@@ -1,0 +1,115 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, for example v1.2.3
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish-nuget:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve tag version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a semantic version tag like v1.2.3, got '$tag'." >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.version.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Verify NuGet API key
+        shell: bash
+        run: |
+          if [[ -z "${{ secrets.NUGET_API_KEY }}" ]]; then
+            echo "NUGET_API_KEY is required to publish the analyzer package to NuGet." >&2
+            exit 1
+          fi
+
+      - name: Restore
+        run: dotnet restore NT.BlazorAnalyzer.slnx
+
+      - name: Build
+        run: dotnet build NT.BlazorAnalyzer.slnx -c Release --no-restore -v minimal -p:Version=${{ steps.version.outputs.version }} -p:PackageVersion=${{ steps.version.outputs.version }} -p:InformationalVersion=${{ steps.version.outputs.version }}
+
+      - name: Test
+        run: dotnet test NT.BlazorAnalyzer.slnx -c Release --no-build -v minimal
+
+      - name: Pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          dotnet pack NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj \
+            -c Release \
+            --no-build \
+            -o "${{ github.workspace }}/artifacts" \
+            -p:ContinuousIntegrationBuild=true \
+            -p:Version=${{ steps.version.outputs.version }} \
+            -p:PackageVersion=${{ steps.version.outputs.version }} \
+            -p:InformationalVersion=${{ steps.version.outputs.version }} \
+            -p:RepositoryUrl=https://github.com/${{ github.repository }}.git \
+            -p:RepositoryBranch=${{ steps.version.outputs.tag }} \
+            -p:RepositoryCommit="${commit}"
+
+      - name: Publish package to NuGet
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=("${{ github.workspace }}/artifacts"/*.nupkg)
+          symbols=("${{ github.workspace }}/artifacts"/*.snupkg)
+
+          if (( ${#packages[@]} == 0 )); then
+            echo 'No NuGet packages were produced.' >&2
+            exit 1
+          fi
+
+          if (( ${#symbols[@]} == 0 )); then
+            echo 'No symbol packages were produced.' >&2
+            exit 1
+          fi
+
+          dotnet nuget push "${packages[@]}" \
+            --api-key "${NUGET_API_KEY}" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
+
+          dotnet nuget push "${symbols[@]}" \
+            --api-key "${NUGET_API_KEY}" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
