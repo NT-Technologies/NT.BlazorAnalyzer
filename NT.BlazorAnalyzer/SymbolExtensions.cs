@@ -43,4 +43,58 @@ internal static class SymbolExtensions
 
         return false;
     }
+
+    public static Location? GetPreferredSourceLocation(this ISymbol symbol)
+    {
+        return symbol.Locations
+            .Where(static location => location.IsInSource)
+            .OrderBy(GetLocationRank)
+            .ThenBy(static location => location.GetLineSpan().Path, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(static location => location.GetLineSpan().StartLinePosition.Line)
+            .FirstOrDefault();
+    }
+
+    public static string? TryGetRazorFilePath(this ISymbol symbol)
+    {
+        foreach (var location in symbol.Locations.Where(static location => location.IsInSource))
+        {
+            var path = location.GetLineSpan().Path;
+            if (path.EndsWith(".razor", StringComparison.OrdinalIgnoreCase))
+            {
+                return path;
+            }
+        }
+
+        foreach (var syntaxReference in symbol.DeclaringSyntaxReferences)
+        {
+            var path = syntaxReference.SyntaxTree.FilePath;
+            if (path.EndsWith(".razor.g.cs", StringComparison.OrdinalIgnoreCase))
+            {
+                return path.Substring(0, path.Length - 5);
+            }
+        }
+
+        return null;
+    }
+
+    private static int GetLocationRank(Location location)
+    {
+        var path = location.GetLineSpan().Path;
+        if (path.EndsWith(".razor", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        if (path.EndsWith(".razor.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            return 1;
+        }
+
+        if (path.EndsWith(".razor.g.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            return 2;
+        }
+
+        return 3;
+    }
 }

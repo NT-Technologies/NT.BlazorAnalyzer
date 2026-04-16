@@ -33,8 +33,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Interactive Blazor lifecycle methods should use try/catch around operational code to avoid unhandled circuit failures.",
-        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
+        description: "Interactive Blazor lifecycle methods should use try/catch around operational code to avoid unhandled circuit failures.");
 
     public static readonly DiagnosticDescriptor DisposeMissingTryCatch = new(
         id: "NTBA0004",
@@ -43,8 +42,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Interactive Blazor dispose methods should use try/catch around operational code to avoid unhandled cleanup failures.",
-        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
+        description: "Interactive Blazor dispose methods should use try/catch around operational code to avoid unhandled cleanup failures.");
 
     public static readonly DiagnosticDescriptor JsInteropMissingTryCatch = new(
         id: "NTBA0005",
@@ -53,8 +51,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "JS interop calls in interactive Blazor components should be wrapped in try/catch so failures are handled intentionally.",
-        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
+        description: "JS interop calls in interactive Blazor components should be wrapped in try/catch so failures are handled intentionally.");
 
     public static readonly DiagnosticDescriptor JsInteropRequiresInteractivityGuard = new(
         id: "NTBA0006",
@@ -63,8 +60,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "JS interop in initialization and parameter lifecycle methods should be guarded by an interactivity check or moved to OnAfterRender.",
-        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
+        description: "JS interop in initialization and parameter lifecycle methods should be guarded by an interactivity check or moved to OnAfterRender.");
 
     public static readonly DiagnosticDescriptor AsyncVoidMethod = new(
         id: "NTBA0007",
@@ -73,8 +69,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Interactive Blazor component methods should return Task instead of async void so exceptions can be observed and handled.",
-        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
+        description: "Interactive Blazor component methods should return Task instead of async void so exceptions can be observed and handled.");
 
     public static readonly DiagnosticDescriptor CatchWithoutLogging = new(
         id: "NTBA0008",
@@ -83,8 +78,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Exception handling in interactive Blazor components should preserve diagnostics through logging, telemetry, or rethrowing.",
-        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
+        description: "Exception handling in interactive Blazor components should preserve diagnostics through logging, telemetry, or rethrowing.");
 
     public static readonly DiagnosticDescriptor ErrorBoundaryMissingErrorContent = new(
         id: "NTBA0009",

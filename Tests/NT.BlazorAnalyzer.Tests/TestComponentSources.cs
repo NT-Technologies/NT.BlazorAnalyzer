@@ -46,6 +46,11 @@ internal static class TestComponentSources
                 }
                 """);
 
+    public static AdditionalSourceFile CreateRazorMarkup(string componentName, string markup) =>
+        new(
+            Path: $"Components/{componentName}.razor",
+            Text: markup);
+
     private static SourceFile CreateComponent(
         string componentName,
         string renderTreeStatements,

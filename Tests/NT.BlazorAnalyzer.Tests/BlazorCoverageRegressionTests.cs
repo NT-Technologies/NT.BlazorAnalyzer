@@ -256,6 +256,188 @@ public sealed class BlazorCoverageRegressionTests
             diagnostic => Assert.Equal("NTBA0009", diagnostic.Id));
     }
 
+    [Fact]
+    public async Task MissingErrorBoundary_UsesRazorMarkupLocation_WhenRazorSourceIsAvailable()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateInteractiveComponent(
+                    componentName: "MarkupCounter",
+                    renderTreeStatements: CreateButtonRenderTree("HandleClick"),
+                    razorMethods: """
+                        private void HandleClick()
+                        {
+                            currentCount++;
+                        }
+                        """)
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "MarkupCounter",
+                    markup: """
+                        @rendermode InteractiveServer
+                        <button @onclick="HandleClick">Click</button>
+                        """)
+            ]);
+
+        var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0001");
+        Assert.EndsWith("Components/MarkupCounter.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task MissingErrorContent_UsesRazorMarkupLocation_WhenRazorSourceIsAvailable()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateInteractiveComponent(
+                    componentName: "BoundaryMarkupCounter",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                        __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                        {
+                            __builder2.OpenElement(2, "button");
+                            __builder2.AddAttribute(3, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create<global::Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, HandleClick));
+                            __builder2.CloseElement();
+                        }));
+                        __builder.CloseComponent();
+                        """,
+                    razorMethods: """
+                        private void HandleClick()
+                        {
+                            currentCount++;
+                        }
+                        """)
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "BoundaryMarkupCounter",
+                    markup: """
+                        @rendermode InteractiveServer
+                        <ErrorBoundary>
+                            <button @onclick="HandleClick">Click</button>
+                        </ErrorBoundary>
+                        """)
+            ]);
+
+        var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0009");
+        Assert.EndsWith("Components/BoundaryMarkupCounter.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task SharedRenderModeCoverage_WorksAcrossDifferentModePropertySyntax()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            new SourceFile(
+                Path: "Components/Page.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        [TestComponents.Page.__PrivateComponentRenderModeAttribute]
+                        public partial class Page : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                                __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                                {
+                                    __builder2.OpenComponent<global::TestComponents.Child>(2);
+                                    __builder2.CloseComponent();
+                                }));
+                                __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                                {
+                                    __builder3.OpenElement(4, "p");
+                                    __builder3.CloseElement();
+                                }));
+                                __builder.CloseComponent();
+                            }
+
+                            private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                            {
+                                public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode
+                                {
+                                    get => global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveAuto;
+                                }
+                            }
+                        }
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/Child.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        [TestComponents.Child.__PrivateComponentRenderModeAttribute]
+                        public partial class Child : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenElement(0, "button");
+                                __builder.AddAttribute(1, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create<global::Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, HandleClick));
+                                __builder.CloseElement();
+                            }
+
+                    #line 100 "Components/Child.razor"
+                            private void HandleClick()
+                            {
+                                currentCount++;
+                            }
+                    #line default
+                    #line hidden
+
+                            private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                            {
+                                public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode
+                                {
+                                    get
+                                    {
+                                        return global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveAuto;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    """));
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task CatchCallingTelemetryHelperByIdentifier_DoesNotReportNtba0008()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "TelemetryCatchComponent",
+                renderTreeStatements: CreateButtonRenderTree("HandleClick"),
+                razorMethods: """
+                    private void HandleClick()
+                    {
+                        try
+                        {
+                            ThrowNow();
+                        }
+                        catch (global::System.Exception ex)
+                        {
+                            CaptureException(ex);
+                        }
+                    }
+
+                    private void ThrowNow()
+                    {
+                        throw new global::System.InvalidOperationException();
+                    }
+
+                    private void CaptureException(global::System.Exception ex)
+                    {
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
+    }
+
     private static string CreateButtonRenderTree(string handlerName) =>
         $$"""
         __builder.OpenElement(0, "button");

@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj" />
+  <Project Path="NT.BlazorAnalyzer.CodeFixes/NT.BlazorAnalyzer.CodeFixes.csproj" />
   <Folder Name="/Tests/">
     <Project Path="Tests/NT.BlazorAnalyzer.Tests/NT.BlazorAnalyzer.Tests.csproj" />
   </Folder>

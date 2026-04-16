@@ -9,12 +9,19 @@ namespace NT.BlazorAnalyzer.Tests;
 
 internal static class AnalyzerTestHarness
 {
-    public static async Task<IReadOnlyList<Diagnostic>> GetDiagnosticsAsync(params SourceFile[] sources)
+    public static async Task<IReadOnlyList<Diagnostic>> GetDiagnosticsAsync(
+        IEnumerable<SourceFile> sources,
+        IEnumerable<AdditionalSourceFile>? additionalFiles = null)
     {
         var compilation = CreateCompilation(sources);
         var analyzer = new BlazorErrorHandlingAnalyzer();
         var analyzers = ImmutableArray.Create<DiagnosticAnalyzer>(analyzer);
-        var compilationWithAnalyzers = compilation.WithAnalyzers(analyzers);
+        var analyzerOptions = new AnalyzerOptions(
+            additionalFiles?
+                .Select(static file => (AdditionalText)new InMemoryAdditionalText(file.Path, file.Text))
+                .ToImmutableArray() ??
+            ImmutableArray<AdditionalText>.Empty);
+        var compilationWithAnalyzers = compilation.WithAnalyzers(analyzers, new CompilationWithAnalyzersOptions(analyzerOptions, null, concurrentAnalysis: true, logAnalyzerExecutionTime: false, reportSuppressedDiagnostics: false));
         var diagnostics = await compilationWithAnalyzers.GetAnalyzerDiagnosticsAsync();
 
         return diagnostics
@@ -23,6 +30,9 @@ internal static class AnalyzerTestHarness
             .ThenBy(static diagnostic => diagnostic.Location.GetLineSpan().StartLinePosition.Line)
             .ToArray();
     }
+
+    public static Task<IReadOnlyList<Diagnostic>> GetDiagnosticsAsync(params SourceFile[] sources) =>
+        GetDiagnosticsAsync((IEnumerable<SourceFile>)sources, additionalFiles: null);
 
     private static CSharpCompilation CreateCompilation(IEnumerable<SourceFile> sources)
     {
