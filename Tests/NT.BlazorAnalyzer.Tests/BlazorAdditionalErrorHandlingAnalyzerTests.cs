@@ -283,4 +283,58 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
 
         Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0009");
     }
+
+    [Fact]
+    public async Task DerivedRootErrorBoundaryWithoutBuiltInFallback_ReportsNtba0009()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateCustomBoundary("CustomBoundary"),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "BoundaryComponent",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.CustomBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(2, "div");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0009");
+    }
+
+    [Fact]
+    public async Task DerivedRootErrorBoundaryWithBuiltInFallback_DoesNotReportNtba0009()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "CustomBoundary",
+                baseType: "global::Microsoft.AspNetCore.Components.Web.ErrorBoundary",
+                renderTreeStatements: """
+                    if (CurrentException is null)
+                    {
+                        __builder.AddContent(0, ChildContent);
+                    }
+                    else
+                    {
+                        __builder.OpenElement(1, "p");
+                        __builder.AddContent(2, "Fallback");
+                        __builder.CloseElement();
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "BoundaryComponent",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.CustomBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(2, "div");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0009");
+    }
 }
