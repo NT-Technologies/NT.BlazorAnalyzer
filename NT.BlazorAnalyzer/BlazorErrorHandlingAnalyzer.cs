@@ -10,6 +10,8 @@ namespace NT.BlazorAnalyzer;
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 {
+    private const string StaticRenderModeKey = "<static>";
+
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
     [
         DiagnosticDescriptors.MissingErrorBoundary,
@@ -41,6 +43,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
             var interactiveComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var allComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
+            var declaredRenderModes = new ConcurrentDictionary<INamedTypeSymbol, string?>(SymbolEqualityComparer.Default);
             var localBoundaryComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var boundaryWithErrorContentComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var componentOwners = new ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>>(SymbolEqualityComparer.Default);
@@ -48,7 +51,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             var methodAnalyses = new ConcurrentDictionary<IMethodSymbol, MethodAnalysis>(SymbolEqualityComparer.Default);
 
             compilationStartContext.RegisterSymbolAction(
-                symbolContext => CollectCandidateComponent(symbolContext, componentBaseSymbol, renderModeAttributeSymbol, interactiveComponents, allComponents),
+                symbolContext => CollectCandidateComponent(symbolContext, componentBaseSymbol, renderModeAttributeSymbol, interactiveComponents, allComponents, declaredRenderModes),
                 SymbolKind.NamedType);
 
             compilationStartContext.RegisterSyntaxNodeAction(
@@ -69,6 +72,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 compilationEndContext => AnalyzeCompilationEnd(
                     compilationEndContext,
                     allComponents,
+                    declaredRenderModes,
                     interactiveComponents,
                     localBoundaryComponents,
                     boundaryWithErrorContentComponents,
@@ -83,7 +87,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         INamedTypeSymbol componentBaseSymbol,
         INamedTypeSymbol renderModeAttributeSymbol,
         ConcurrentDictionary<INamedTypeSymbol, byte> interactiveComponents,
-        ConcurrentDictionary<INamedTypeSymbol, byte> allComponents)
+        ConcurrentDictionary<INamedTypeSymbol, byte> allComponents,
+        ConcurrentDictionary<INamedTypeSymbol, string?> declaredRenderModes)
     {
         var namedType = (INamedTypeSymbol)context.Symbol;
         if (!IsComponent(namedType, componentBaseSymbol))
@@ -92,7 +97,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         allComponents.TryAdd(namedType, 0);
-        if (HasExplicitInteractiveRenderMode(namedType, renderModeAttributeSymbol))
+        var declaredRenderMode = GetDeclaredRenderModeKey(namedType, renderModeAttributeSymbol);
+        declaredRenderModes.TryAdd(namedType, declaredRenderMode);
+        if (declaredRenderMode is not null)
         {
             interactiveComponents.TryAdd(namedType, 0);
         }
@@ -155,7 +162,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        if (!HasExplicitInteractiveRenderMode(containingType, renderModeAttributeSymbol) ||
+        if (GetDeclaredRenderModeKey(containingType, renderModeAttributeSymbol) is null ||
             !IsRelevantMethod(methodSymbol, containingType))
         {
             return;
@@ -167,6 +174,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static void AnalyzeCompilationEnd(
         CompilationAnalysisContext context,
         ConcurrentDictionary<INamedTypeSymbol, byte> allComponents,
+        ConcurrentDictionary<INamedTypeSymbol, string?> declaredRenderModes,
         ConcurrentDictionary<INamedTypeSymbol, byte> interactiveComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> localBoundaryComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> boundaryWithErrorContentComponents,
@@ -174,11 +182,14 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ConcurrentDictionary<IMethodSymbol, byte> buildRenderTreeRootMethods,
         ConcurrentDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
     {
-        var boundaryProtectedComponents = ComputeBoundaryProtectedComponents(allComponents.Keys, interactiveComponents, localBoundaryComponents, componentOwners);
+        var effectiveRenderModes = ComputeEffectiveRenderModes(allComponents.Keys, declaredRenderModes, componentOwners);
+        var relevantComponents = ComputeRelevantBoundaryComponents(effectiveRenderModes, componentOwners);
+        var boundaryProtectedComponents = ComputeBoundaryProtectedComponents(relevantComponents, effectiveRenderModes, localBoundaryComponents, componentOwners);
+        var suggestedBoundaryResolvers = ComputeSuggestedBoundaryResolvers(relevantComponents, effectiveRenderModes, componentOwners);
 
-        foreach (var component in interactiveComponents.Keys.OrderBy(static type => type.ToDisplayString(), StringComparer.Ordinal))
+        foreach (var component in relevantComponents.OrderBy(static type => type.ToDisplayString(), StringComparer.Ordinal))
         {
-            var boundaryProtected = boundaryProtectedComponents.ContainsKey(component);
+            var boundaryProtected = boundaryProtectedComponents.Contains(component);
             var typeLocation = component.Locations.FirstOrDefault(static location => location.IsInSource);
 
             if (!boundaryProtected && typeLocation is not null)
@@ -186,7 +197,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 context.ReportDiagnostic(Diagnostic.Create(
                     DiagnosticDescriptors.MissingErrorBoundary,
                     typeLocation,
-                    component.Name));
+                    component.Name,
+                    suggestedBoundaryResolvers.TryGetValue(component, out var resolver) ? resolver.Name : component.Name));
             }
 
             if (localBoundaryComponents.ContainsKey(component) &&
@@ -306,50 +318,229 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static ConcurrentDictionary<INamedTypeSymbol, byte> ComputeBoundaryProtectedComponents(
+    private static Dictionary<INamedTypeSymbol, ImmutableHashSet<string>> ComputeEffectiveRenderModes(
         IEnumerable<INamedTypeSymbol> allComponents,
-        ConcurrentDictionary<INamedTypeSymbol, byte> explicitInteractiveComponents,
-        ConcurrentDictionary<INamedTypeSymbol, byte> localBoundaryComponents,
+        ConcurrentDictionary<INamedTypeSymbol, string?> declaredRenderModes,
         ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners)
     {
-        var coveredComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(localBoundaryComponents, SymbolEqualityComparer.Default);
         var allComponentSet = new HashSet<INamedTypeSymbol>(allComponents, SymbolEqualityComparer.Default);
-        var changed = true;
+        var effectiveRenderModes = new Dictionary<INamedTypeSymbol, ImmutableHashSet<string>.Builder>(SymbolEqualityComparer.Default);
+        foreach (var component in allComponentSet)
+        {
+            effectiveRenderModes[component] = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
+        }
 
+        foreach (var component in allComponentSet)
+        {
+            if (declaredRenderModes.TryGetValue(component, out var declaredRenderMode) &&
+                declaredRenderMode is not null)
+            {
+                effectiveRenderModes[component].Add(declaredRenderMode);
+            }
+        }
+
+        var changed = true;
         while (changed)
         {
             changed = false;
 
             foreach (var component in allComponentSet)
             {
-                if (coveredComponents.ContainsKey(component))
+                if (declaredRenderModes.TryGetValue(component, out var declaredRenderMode) &&
+                    declaredRenderMode is not null)
                 {
                     continue;
                 }
 
                 if (!componentOwners.TryGetValue(component, out var owners) || owners.IsEmpty)
                 {
+                    changed |= effectiveRenderModes[component].Add(StaticRenderModeKey);
                     continue;
                 }
 
-                var allOwnersCovered = true;
                 foreach (var owner in owners.Keys)
                 {
-                    if (!coveredComponents.ContainsKey(owner) || !explicitInteractiveComponents.ContainsKey(owner))
+                    foreach (var renderMode in effectiveRenderModes[owner])
                     {
-                        allOwnersCovered = false;
-                        break;
+                        changed |= effectiveRenderModes[component].Add(renderMode);
                     }
-                }
-
-                if (allOwnersCovered && coveredComponents.TryAdd(component, 0))
-                {
-                    changed = true;
                 }
             }
         }
 
-        return coveredComponents;
+        var results = new Dictionary<INamedTypeSymbol, ImmutableHashSet<string>>(SymbolEqualityComparer.Default);
+        foreach (var pair in effectiveRenderModes)
+        {
+            results[pair.Key] = pair.Value.ToImmutable();
+        }
+
+        return results;
+    }
+
+    private static HashSet<INamedTypeSymbol> ComputeRelevantBoundaryComponents(
+        IReadOnlyDictionary<INamedTypeSymbol, ImmutableHashSet<string>> effectiveRenderModes,
+        ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners)
+    {
+        var relevantComponents = new HashSet<INamedTypeSymbol>(
+            effectiveRenderModes
+                .Where(static pair => pair.Value.Any(static renderMode => !string.Equals(renderMode, StaticRenderModeKey, StringComparison.Ordinal)))
+                .Select(static pair => pair.Key),
+            SymbolEqualityComparer.Default);
+
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+
+            foreach (var component in relevantComponents.ToArray())
+            {
+                if (!componentOwners.TryGetValue(component, out var owners))
+                {
+                    continue;
+                }
+
+                foreach (var owner in owners.Keys)
+                {
+                    changed |= relevantComponents.Add(owner);
+                }
+            }
+        }
+
+        return relevantComponents;
+    }
+
+    private static HashSet<INamedTypeSymbol> ComputeBoundaryProtectedComponents(
+        IEnumerable<INamedTypeSymbol> relevantComponents,
+        IReadOnlyDictionary<INamedTypeSymbol, ImmutableHashSet<string>> effectiveRenderModes,
+        ConcurrentDictionary<INamedTypeSymbol, byte> localBoundaryComponents,
+        ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners)
+    {
+        var relevantComponentSet = new HashSet<INamedTypeSymbol>(relevantComponents, SymbolEqualityComparer.Default);
+        var protectedRenderModes = new Dictionary<INamedTypeSymbol, ImmutableHashSet<string>.Builder>(SymbolEqualityComparer.Default);
+        foreach (var component in relevantComponentSet)
+        {
+            protectedRenderModes[component] = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
+        }
+
+        foreach (var component in relevantComponentSet)
+        {
+            if (localBoundaryComponents.ContainsKey(component))
+            {
+                protectedRenderModes[component].UnionWith(effectiveRenderModes[component]);
+            }
+        }
+
+        var changed = true;
+
+        while (changed)
+        {
+            changed = false;
+
+            foreach (var component in relevantComponentSet)
+            {
+                if (!componentOwners.TryGetValue(component, out var owners) || owners.IsEmpty)
+                {
+                    continue;
+                }
+
+                foreach (var renderMode in effectiveRenderModes[component])
+                {
+                    if (protectedRenderModes[component].Contains(renderMode))
+                    {
+                        continue;
+                    }
+
+                    var allOwnersCovered = true;
+                    foreach (var owner in owners.Keys)
+                    {
+                        if (!effectiveRenderModes.TryGetValue(owner, out var ownerRenderModes) ||
+                            !ownerRenderModes.Contains(renderMode) ||
+                            !protectedRenderModes[owner].Contains(renderMode))
+                        {
+                            allOwnersCovered = false;
+                            break;
+                        }
+                    }
+
+                    if (allOwnersCovered)
+                    {
+                        changed |= protectedRenderModes[component].Add(renderMode);
+                    }
+                }
+            }
+        }
+
+        return new HashSet<INamedTypeSymbol>(
+            relevantComponentSet.Where(component => effectiveRenderModes[component].All(renderMode => protectedRenderModes[component].Contains(renderMode))),
+            SymbolEqualityComparer.Default);
+    }
+
+    private static Dictionary<INamedTypeSymbol, INamedTypeSymbol> ComputeSuggestedBoundaryResolvers(
+        IEnumerable<INamedTypeSymbol> relevantComponents,
+        IReadOnlyDictionary<INamedTypeSymbol, ImmutableHashSet<string>> effectiveRenderModes,
+        ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners)
+    {
+        var relevantComponentSet = new HashSet<INamedTypeSymbol>(relevantComponents, SymbolEqualityComparer.Default);
+        var resolverByRenderMode = new Dictionary<INamedTypeSymbol, Dictionary<string, INamedTypeSymbol>>(SymbolEqualityComparer.Default);
+        foreach (var component in relevantComponentSet)
+        {
+            var renderModeResolvers = new Dictionary<string, INamedTypeSymbol>(StringComparer.Ordinal);
+            foreach (var renderMode in effectiveRenderModes[component])
+            {
+                renderModeResolvers[renderMode] = component;
+            }
+
+            resolverByRenderMode[component] = renderModeResolvers;
+        }
+
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+
+            foreach (var component in relevantComponentSet)
+            {
+                foreach (var renderMode in effectiveRenderModes[component])
+                {
+                    var ownersWithSameRenderMode = componentOwners.TryGetValue(component, out var owners)
+                        ? owners.Keys.Where(owner => effectiveRenderModes.TryGetValue(owner, out var ownerRenderModes) && ownerRenderModes.Contains(renderMode)).ToArray()
+                        : [];
+
+                    var resolver = component;
+                    if (ownersWithSameRenderMode.Length > 0)
+                    {
+                        var ownerResolvers = ownersWithSameRenderMode
+                            .Select(owner => resolverByRenderMode[owner][renderMode])
+                            .Distinct<INamedTypeSymbol>(SymbolEqualityComparer.Default)
+                            .ToArray();
+
+                        if (ownerResolvers.Length == 1)
+                        {
+                            resolver = ownerResolvers[0];
+                        }
+                    }
+
+                    if (!SymbolEqualityComparer.Default.Equals(resolverByRenderMode[component][renderMode], resolver))
+                    {
+                        resolverByRenderMode[component][renderMode] = resolver;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        var suggestedResolvers = new Dictionary<INamedTypeSymbol, INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        foreach (var component in relevantComponentSet)
+        {
+            var distinctResolvers = resolverByRenderMode[component]
+                .Values
+                .Distinct<INamedTypeSymbol>(SymbolEqualityComparer.Default)
+                .ToArray();
+
+            suggestedResolvers[component] = distinctResolvers.Length == 1 ? distinctResolvers[0] : component;
+        }
+
+        return suggestedResolvers;
     }
 
     private static bool IsComponent(INamedTypeSymbol namedType, INamedTypeSymbol componentBaseSymbol) =>
@@ -357,19 +548,49 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         namedType.InheritsFromOrEquals(componentBaseSymbol) &&
         namedType.HasPathContaining(".razor");
 
-    private static bool HasExplicitInteractiveRenderMode(INamedTypeSymbol namedType, INamedTypeSymbol renderModeAttributeSymbol)
+    private static string? GetDeclaredRenderModeKey(INamedTypeSymbol namedType, INamedTypeSymbol renderModeAttributeSymbol)
     {
         foreach (var attribute in namedType.GetAttributes())
         {
             if (attribute.AttributeClass is INamedTypeSymbol attributeClass &&
                 attributeClass.InheritsFromOrEquals(renderModeAttributeSymbol))
             {
-                return true;
+                return GetRenderModeKey(attributeClass);
             }
         }
 
-        return false;
+        return null;
     }
+
+    private static string GetRenderModeKey(INamedTypeSymbol renderModeAttribute)
+    {
+        var modeProperty = renderModeAttribute.GetMembers("Mode").OfType<IPropertySymbol>().FirstOrDefault();
+        if (modeProperty?.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is PropertyDeclarationSyntax propertyDeclaration)
+        {
+            if (propertyDeclaration.ExpressionBody is { Expression: { } expression })
+            {
+                return NormalizeRenderModeKey(expression.ToString());
+            }
+
+            if (propertyDeclaration.AccessorList?.Accessors.FirstOrDefault(static accessor => accessor.Keyword.IsKind(SyntaxKind.GetKeyword)) is { } getter)
+            {
+                if (getter.ExpressionBody is { Expression: { } getterExpression })
+                {
+                    return NormalizeRenderModeKey(getterExpression.ToString());
+                }
+
+                if (getter.Body?.Statements.OfType<ReturnStatementSyntax>().FirstOrDefault() is { Expression: { } returnExpression })
+                {
+                    return NormalizeRenderModeKey(returnExpression.ToString());
+                }
+            }
+        }
+
+        return renderModeAttribute.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", string.Empty);
+    }
+
+    private static string NormalizeRenderModeKey(string renderModeExpression) =>
+        string.Concat(renderModeExpression.Where(static character => !char.IsWhiteSpace(character)));
 
     private static bool IsRelevantMethod(IMethodSymbol methodSymbol, INamedTypeSymbol containingType) =>
         methodSymbol.MethodKind == MethodKind.Ordinary &&

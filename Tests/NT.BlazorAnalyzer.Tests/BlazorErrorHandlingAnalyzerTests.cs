@@ -249,9 +249,9 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Collection(
-            diagnostics,
-            diagnostic => Assert.Equal("NTBA0001", diagnostic.Id));
+        Assert.Equal(2, diagnostics.Count);
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'MultipleRootComponent'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Counter'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'MultipleRootComponent'", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -707,6 +707,170 @@ public sealed class BlazorErrorHandlingAnalyzerTests
             {
                 Assert.Equal("NTBA0002", diagnostic.Id);
                 Assert.Contains("Child", diagnostic.GetMessage(), StringComparison.Ordinal);
+            });
+    }
+
+    [Fact]
+    public async Task InteractiveHierarchy_SharedRenderMode_WarnsOnAllLevels_AndTopBoundaryCoversWholeTree()
+    {
+        var unwrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.Child>(0);
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Child",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.Grandchild>(0);
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Grandchild",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "span");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.Equal(3, unwrappedDiagnostics.Count);
+        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal));
+        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Child'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Page'", StringComparison.Ordinal));
+        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Page'", StringComparison.Ordinal));
+
+        var wrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.Child>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Child",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.Grandchild>(0);
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Grandchild",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "span");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.Empty(wrappedDiagnostics);
+    }
+
+    [Fact]
+    public async Task StaticPage_WithInteractiveDescendants_WarnsOnAllLevels_AndCoverageStopsAtRenderModeBoundary()
+    {
+        var unwrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.Child>(0);
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Child",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.Grandchild>(0);
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Grandchild",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "span");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.Equal(3, unwrappedDiagnostics.Count);
+        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Page'", StringComparison.Ordinal));
+        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Child'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Child'", StringComparison.Ordinal));
+        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Child'", StringComparison.Ordinal));
+
+        var pageWrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.Child>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Child",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.Grandchild>(0);
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Grandchild",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "span");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.Equal(2, pageWrappedDiagnostics.Count);
+        Assert.DoesNotContain(pageWrappedDiagnostics, diagnostic => diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal));
+        Assert.Contains(pageWrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Child'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Child'", StringComparison.Ordinal));
+        Assert.Contains(pageWrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Child'", StringComparison.Ordinal));
+
+        var childWrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.Child>(0);
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Child",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.Grandchild>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Grandchild",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "span");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.Collection(
+            childWrappedDiagnostics,
+            diagnostic =>
+            {
+                Assert.Equal("NTBA0001", diagnostic.Id);
+                Assert.Contains("Component 'Page'", diagnostic.GetMessage(), StringComparison.Ordinal);
+                Assert.Contains("'Page'", diagnostic.GetMessage(), StringComparison.Ordinal);
             });
     }
 
