@@ -46,6 +46,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             var declaredRenderModes = new ConcurrentDictionary<INamedTypeSymbol, string?>(SymbolEqualityComparer.Default);
             var localBoundaryComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var boundaryWithErrorContentComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
+            var boundaryComponentsWithBuiltInErrorContent = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
+            var rootBoundaryComponents = new ConcurrentDictionary<INamedTypeSymbol, INamedTypeSymbol>(SymbolEqualityComparer.Default);
             var componentOwners = new ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>>(SymbolEqualityComparer.Default);
             var buildRenderTreeRootMethods = new ConcurrentDictionary<IMethodSymbol, byte>(SymbolEqualityComparer.Default);
             var methodAnalyses = new ConcurrentDictionary<IMethodSymbol, MethodAnalysis>(SymbolEqualityComparer.Default);
@@ -115,6 +117,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     allComponents,
                     localBoundaryComponents,
                     boundaryWithErrorContentComponents,
+                    boundaryComponentsWithBuiltInErrorContent,
+                    rootBoundaryComponents,
                     componentOwners,
                     buildRenderTreeRootMethods,
                     methodAnalyses,
@@ -134,6 +138,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     interactiveComponents,
                     localBoundaryComponents,
                     boundaryWithErrorContentComponents,
+                    boundaryComponentsWithBuiltInErrorContent,
+                    rootBoundaryComponents,
                     componentOwners,
                     buildRenderTreeRootMethods,
                     methodAnalyses,
@@ -182,6 +188,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ConcurrentDictionary<INamedTypeSymbol, byte> allComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> localBoundaryComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> boundaryWithErrorContentComponents,
+        ConcurrentDictionary<INamedTypeSymbol, byte> boundaryComponentsWithBuiltInErrorContent,
+        ConcurrentDictionary<INamedTypeSymbol, INamedTypeSymbol> rootBoundaryComponents,
         ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners,
         ConcurrentDictionary<IMethodSymbol, byte> buildRenderTreeRootMethods,
         ConcurrentDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses,
@@ -425,6 +433,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ConcurrentDictionary<INamedTypeSymbol, byte> interactiveComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> localBoundaryComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> boundaryWithErrorContentComponents,
+        ConcurrentDictionary<INamedTypeSymbol, byte> boundaryComponentsWithBuiltInErrorContent,
+        ConcurrentDictionary<INamedTypeSymbol, INamedTypeSymbol> rootBoundaryComponents,
         ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners,
         ConcurrentDictionary<IMethodSymbol, byte> buildRenderTreeRootMethods,
         ConcurrentDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses,
@@ -1051,7 +1061,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     var componentType = TryGetComponentType(invocation, semanticModel, cancellationToken);
                     if (currentRoot is null)
                     {
-                        currentRoot = RootAnalysisState.CreateComponentRoot(componentType, errorBoundarySymbol, context.CancellationToken, invocation.GetLocation());
+                        currentRoot = RootAnalysisState.CreateComponentRoot(componentType, errorBoundarySymbol, cancellationToken, invocation.GetLocation());
                     }
                     else
                     {
@@ -1264,6 +1274,44 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         var metadataName = componentType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", string.Empty);
         return metadataName is "Microsoft.AspNetCore.Components.Web.PageTitle" or
             "Microsoft.AspNetCore.Components.Web.HeadContent";
+    }
+
+    private static bool BoundaryTypeHasBuiltInErrorContent(
+        INamedTypeSymbol boundaryType,
+        INamedTypeSymbol errorBoundarySymbol,
+        CancellationToken cancellationToken)
+    {
+        if (SymbolEqualityComparer.Default.Equals(boundaryType, errorBoundarySymbol))
+        {
+            return false;
+        }
+
+        foreach (var buildRenderTreeMethod in boundaryType.GetMembers("BuildRenderTree").OfType<IMethodSymbol>())
+        {
+            foreach (var syntaxReference in buildRenderTreeMethod.DeclaringSyntaxReferences)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (syntaxReference.GetSyntax(cancellationToken) is not MethodDeclarationSyntax methodDeclaration ||
+                    methodDeclaration.Body is null)
+                {
+                    continue;
+                }
+
+                if (methodDeclaration.Body.DescendantNodesAndSelf().OfType<ExpressionSyntax>().Any(expression =>
+                    expression switch
+                    {
+                        IdentifierNameSyntax identifier => identifier.Identifier.ValueText is "CurrentException" or "ErrorContent",
+                        MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText is "CurrentException" or "ErrorContent",
+                        _ => false
+                    }))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private static bool HasEventAttribute(
@@ -1737,6 +1785,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             var childComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
             var hasBoundaryRoot = false;
             var boundaryRootHasErrorContent = true;
+            INamedTypeSymbol? rootBoundaryComponent = null;
             Location? firstUnprotectedRootLocation = null;
             Location? boundaryRootLocation = null;
 
@@ -1760,6 +1809,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
                 hasBoundaryRoot |= razorAnalysis?.HasBoundaryRoot ?? generatedAnalysis.HasBoundaryRoot;
                 boundaryRootHasErrorContent &= razorAnalysis?.BoundaryRootHasErrorContent ?? generatedAnalysis.BoundaryRootHasErrorContent;
+                rootBoundaryComponent ??= generatedAnalysis.RootBoundaryComponent;
                 firstUnprotectedRootLocation ??= razorAnalysis?.FirstUnprotectedRootLocation ?? generatedAnalysis.FirstUnprotectedRootLocation;
                 boundaryRootLocation ??= razorAnalysis?.BoundaryRootLocation ?? generatedAnalysis.BoundaryRootLocation;
 
@@ -1772,6 +1822,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return new RenderTreeAnalysis(
                 hasBoundaryRoot,
                 boundaryRootHasErrorContent,
+                rootBoundaryComponent,
                 childComponents.ToImmutable(),
                 firstUnprotectedRootLocation,
                 boundaryRootLocation);
