@@ -27,6 +27,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     """));
 
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("OnInitializedAsync", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -51,6 +52,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     """));
 
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0004");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("Method 'Dispose'", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -74,6 +76,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     """));
 
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0005");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("HandleClick", StringComparison.Ordinal));
     }
 
     [Fact]

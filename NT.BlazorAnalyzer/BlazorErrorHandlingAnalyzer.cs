@@ -212,11 +212,20 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 .Distinct<IMethodSymbol>(SymbolEqualityComparer.Default)
                 .ToArray();
 
+            var methodsWithSpecificTryCatchDiagnostics = methods
+                .Where(method => HasSpecificTryCatchDiagnostic(methodAnalyses[method]))
+                .ToImmutableHashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+
             if (!boundaryProtected)
             {
                 var unsafeMethods = FindUnsafeReachableMethods(rootMethods, methodAnalyses);
                 foreach (var method in unsafeMethods.OrderBy(static method => method.Locations.FirstOrDefault(static location => location.IsInSource)?.GetLineSpan().StartLinePosition.Line ?? int.MaxValue))
                 {
+                    if (methodsWithSpecificTryCatchDiagnostics.Contains(method))
+                    {
+                        continue;
+                    }
+
                     var methodLocation = method.Locations.FirstOrDefault(static location => location.IsInSource);
                     if (methodLocation is null)
                     {
@@ -414,6 +423,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static bool IsAsyncVoid(MethodDeclarationSyntax methodDeclaration, IMethodSymbol methodSymbol) =>
         methodSymbol.ReturnsVoid &&
         methodDeclaration.Modifiers.Any(static modifier => modifier.IsKind(SyntaxKind.AsyncKeyword));
+
+    private static bool HasSpecificTryCatchDiagnostic(MethodAnalysis analysis) =>
+        !analysis.HasTryCatch &&
+        ((analysis.IsLifecycleMethod && analysis.HasOperationalCode) ||
+         (analysis.IsDisposeMethod && analysis.HasOperationalCode) ||
+         analysis.HasJsInteropCalls);
 
     private static bool HasOperationalCode(MethodDeclarationSyntax methodDeclaration)
     {
