@@ -337,4 +337,114 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
 
         Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0009");
     }
+
+    [Fact]
+    public async Task InteractiveDerivedErrorBoundaryWithBuiltInFallback_DoesNotReportNtba0001()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "CustomBoundary",
+                baseType: "global::Microsoft.AspNetCore.Components.Web.ErrorBoundary",
+                renderTreeStatements: """
+                    if (CurrentException is null)
+                    {
+                        __builder.AddContent(0, ChildContent);
+                    }
+                    else
+                    {
+                        __builder.OpenElement(1, "p");
+                        __builder.AddContent(2, "Fallback");
+                        __builder.CloseElement();
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
+    }
+
+    [Fact]
+    public async Task InteractiveDerivedComponent_InheritsBoundaryProtectionFromWrappedBaseComponent()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "BaseSelect",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(2, "div");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """),
+            new SourceFile(
+                Path: "Components/DerivedSelect.cs",
+                Text: """
+                    namespace TestComponents;
+
+                    [DerivedSelect.__PrivateComponentRenderModeAttribute]
+                    public class DerivedSelect : BaseSelect
+                    {
+                        private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                        {
+                            public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer;
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("DerivedSelect", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task InteractiveDerivedComponent_InheritsBoundaryProtectionFromWrappedGenericBaseComponent()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            new SourceFile(
+                Path: "Components/GenericBaseSelect.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        public partial class GenericBaseSelect<TItem> : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                                __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                                {
+                                    __builder2.OpenElement(2, "div");
+                                    __builder2.CloseElement();
+                                }));
+                                __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                                {
+                                    __builder3.OpenElement(4, "p");
+                                    __builder3.CloseElement();
+                                }));
+                                __builder.CloseComponent();
+                            }
+                        }
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/DerivedSelect.cs",
+                Text: """
+                    namespace TestComponents;
+
+                    [DerivedSelect.__PrivateComponentRenderModeAttribute]
+                    public class DerivedSelect : GenericBaseSelect<string>
+                    {
+                        private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                        {
+                            public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer;
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("DerivedSelect", StringComparison.Ordinal));
+    }
 }

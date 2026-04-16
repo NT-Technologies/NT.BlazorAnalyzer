@@ -213,6 +213,16 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
+        if (methodDeclaration.Body is not null && IsRenderMethod(methodSymbol))
+        {
+            foreach (var childComponent in GetRenderedChildComponents(methodDeclaration.Body, context.SemanticModel, componentBaseSymbol, context.CancellationToken))
+            {
+                allComponents.TryAdd(childComponent, 0);
+                var owners = componentOwners.GetOrAdd(childComponent, static _ => new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default));
+                owners.TryAdd(containingType, 0);
+            }
+        }
+
         if (methodSymbol.Name == "BuildRenderTree")
         {
             if (methodDeclaration.Body is null)
@@ -246,6 +256,14 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 missingBoundaryLocation,
                 boundaryLocation);
 
+            if (containingType.InheritsFromOrEquals(errorBoundarySymbol) &&
+                BoundaryTypeHasBuiltInErrorContent(containingType, errorBoundarySymbol, context.CancellationToken))
+            {
+                localBoundaryComponents.TryAdd(containingType, 0);
+                boundaryComponentsWithBuiltInErrorContent.TryAdd(containingType, 0);
+                boundaryWithErrorContentComponents.TryAdd(containingType, 0);
+            }
+
             if (hasBoundaryRoot)
             {
                 localBoundaryComponents.TryAdd(containingType, 0);
@@ -264,6 +282,13 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             {
                 allComponents.TryAdd(childComponent, 0);
                 var owners = componentOwners.GetOrAdd(childComponent, static _ => new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default));
+                owners.TryAdd(containingType, 0);
+            }
+
+            foreach (var referencedComponent in GetReferencedComponentBuildRenderTrees(methodDeclaration, context.SemanticModel, containingType, componentBaseSymbol, context.CancellationToken))
+            {
+                allComponents.TryAdd(referencedComponent, 0);
+                var owners = componentOwners.GetOrAdd(referencedComponent, static _ => new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default));
                 owners.TryAdd(containingType, 0);
             }
 
@@ -638,6 +663,25 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             if (localBoundaryComponents.ContainsKey(component))
             {
                 protectedRenderModes[component].UnionWith(effectiveRenderModes[component]);
+                continue;
+            }
+
+            for (var currentBaseType = component.BaseType; currentBaseType is not null; currentBaseType = currentBaseType.BaseType)
+            {
+                var inheritedBoundaryComponent =
+                    relevantComponentSet.Contains(currentBaseType) && localBoundaryComponents.ContainsKey(currentBaseType)
+                        ? currentBaseType
+                        : relevantComponentSet.Contains(currentBaseType.OriginalDefinition) && localBoundaryComponents.ContainsKey(currentBaseType.OriginalDefinition)
+                            ? currentBaseType.OriginalDefinition
+                            : null;
+
+                if (inheritedBoundaryComponent is null)
+                {
+                    continue;
+                }
+
+                protectedRenderModes[component].UnionWith(effectiveRenderModes[component]);
+                break;
             }
         }
 
@@ -864,6 +908,24 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         return methodSymbol.TryGetRazorFilePath();
+    }
+
+    private static bool IsRenderMethod(IMethodSymbol methodSymbol)
+    {
+        if (methodSymbol.IsImplicitlyDeclared || !methodSymbol.ReturnsVoid)
+        {
+            return false;
+        }
+
+        if (methodSymbol.Name == "BuildRenderTree")
+        {
+            return true;
+        }
+
+        return methodSymbol.Parameters.Any(parameter =>
+            parameter.Type is INamedTypeSymbol parameterType &&
+            GetTypeMetadataNames(parameterType).Any(static metadataName =>
+                metadataName == "Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder"));
     }
 
     private static bool IsRelevantMethod(IMethodSymbol methodSymbol, INamedTypeSymbol containingType) =>
@@ -1379,6 +1441,47 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
     }
 
+    private static IEnumerable<INamedTypeSymbol> GetReferencedComponentBuildRenderTrees(
+        MethodDeclarationSyntax methodDeclaration,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        INamedTypeSymbol componentBaseSymbol,
+        CancellationToken cancellationToken)
+    {
+        if (methodDeclaration.Body is null)
+        {
+            yield break;
+        }
+
+        var seen = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        foreach (var expression in methodDeclaration.Body.DescendantNodesAndSelf().OfType<ExpressionSyntax>())
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(expression, cancellationToken);
+            var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
+
+            if (symbol is not IMethodSymbol methodSymbol)
+            {
+                continue;
+            }
+
+            methodSymbol = NormalizeMethodSymbol(methodSymbol);
+            if (methodSymbol.Name != "BuildRenderTree")
+            {
+                continue;
+            }
+
+            var referencedComponent = NormalizeComponentSymbol(methodSymbol.ContainingType);
+            if (!IsComponent(referencedComponent, componentBaseSymbol) ||
+                SymbolEqualityComparer.Default.Equals(referencedComponent, NormalizeComponentSymbol(containingType)) ||
+                !seen.Add(referencedComponent))
+            {
+                continue;
+            }
+
+            yield return referencedComponent;
+        }
+    }
+
     private static IEnumerable<IMethodSymbol> GetCalledMemberMethods(
         MethodDeclarationSyntax methodDeclaration,
         SemanticModel semanticModel,
@@ -1454,6 +1557,30 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         methodSymbol = NormalizeMethodSymbol(methodSymbol);
         return IsRelevantMethod(methodSymbol, containingType) ? methodSymbol : null;
+    }
+
+    private static IEnumerable<INamedTypeSymbol> GetRenderedChildComponents(
+        BlockSyntax body,
+        SemanticModel semanticModel,
+        INamedTypeSymbol componentBaseSymbol,
+        CancellationToken cancellationToken)
+    {
+        var seen = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        foreach (var invocation in body.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
+        {
+            if (invocation.Expression is not MemberAccessExpressionSyntax { Name.Identifier.ValueText: "OpenComponent" })
+            {
+                continue;
+            }
+
+            var childComponent = TryGetComponentType(invocation, semanticModel, cancellationToken);
+            if (childComponent is null || !IsComponent(childComponent, componentBaseSymbol) || !seen.Add(childComponent))
+            {
+                continue;
+            }
+
+            yield return childComponent;
+        }
     }
 
     private static IEnumerable<InvocationExpressionSyntax> GetJsInteropInvocations(
@@ -1659,6 +1786,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     }
 
     private static IMethodSymbol NormalizeMethodSymbol(IMethodSymbol methodSymbol) => methodSymbol.OriginalDefinition;
+
+    private static INamedTypeSymbol NormalizeComponentSymbol(INamedTypeSymbol componentSymbol) => componentSymbol.OriginalDefinition;
 
     private static bool MethodContainsTryCatch(MethodDeclarationSyntax methodDeclaration)
     {

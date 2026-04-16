@@ -874,6 +874,102 @@ public sealed class BlazorErrorHandlingAnalyzerTests
             });
     }
 
+    [Fact]
+    public async Task InteractiveBoundaryWrappedComponent_ProtectsChildrenRenderedFromHelperMethod()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        RenderPageContent(__builder2);
+                    }));
+                    __builder.AddAttribute(2, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(3, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private void RenderPageContent(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                    {
+                        __builder.OpenComponent<global::TestComponents.Child>(0);
+                        __builder.CloseComponent();
+                    }
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Child",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "span");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
+    }
+
+    [Fact]
+    public async Task InteractiveBoundaryWrappedDerivedComponent_ProtectsGenericBaseBuildRenderTreeChildren()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            new SourceFile(
+                Path: "Components/BasePage.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        public partial class BasePage<TPage> : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenComponent<global::TestComponents.Child>(0);
+                                __builder.CloseComponent();
+                            }
+                        }
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/Page.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        [Page.__PrivateComponentRenderModeAttribute]
+                        public partial class Page : global::TestComponents.BasePage<Page>
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                                __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                                {
+                                    base.BuildRenderTree(__builder2);
+                                }));
+                                __builder.AddAttribute(2, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                                {
+                                    __builder3.OpenElement(3, "p");
+                                    __builder3.CloseElement();
+                                }));
+                                __builder.CloseComponent();
+                            }
+
+                            private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                            {
+                                public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                    global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer;
+                            }
+                        }
+                    }
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Child",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "span");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
+    }
+
     private static string CreateButtonRenderTree(string handlerName, string elementName = "button") =>
         $$"""
         __builder.OpenElement(0, "{{elementName}}");
