@@ -91,7 +91,7 @@ internal static class RazorMarkupAnalyzer
                         hasBoundaryProtectedContent = true;
                         rootBoundaryHasErrorContent = false;
                     }
-                    else if (isComponent)
+                    else if (isComponent && HasCallbackLikeComponentAttribute(tag.Attributes))
                     {
                         hasUnprotectedInteractiveRoot = true;
                         firstUnprotectedRootLocation ??= CreateLocation(sourceText, razorPath, tag.NameSpan);
@@ -112,7 +112,7 @@ internal static class RazorMarkupAnalyzer
 
                 if (activeBoundaryCount == 0 && !isIgnoredRoot)
                 {
-                    if (isComponent)
+                    if (isComponent && HasCallbackLikeComponentAttribute(tag.Attributes))
                     {
                         hasUnprotectedInteractiveRoot = true;
                         firstUnprotectedRootLocation ??= CreateLocation(sourceText, razorPath, tag.NameSpan);
@@ -356,6 +356,10 @@ internal static class RazorMarkupAnalyzer
 
     private static bool HasEventHandlerAttribute(string attributes) =>
         attributes.IndexOf("@on", StringComparison.OrdinalIgnoreCase) >= 0;
+
+    private static bool HasCallbackLikeComponentAttribute(string attributes) =>
+        attributes.IndexOf("@bind-", StringComparison.OrdinalIgnoreCase) >= 0 ||
+        attributes.IndexOf("=>", StringComparison.Ordinal) >= 0;
 
     private static bool IsBoundaryTag(string tagName, ImmutableHashSet<string> boundaryComponentNames) =>
         string.Equals(tagName, "ErrorBoundary", StringComparison.Ordinal) ||

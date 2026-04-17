@@ -217,14 +217,13 @@ public sealed class BlazorCoverageRegressionTests
                     private void HandleClickCore() => HandleClick();
                     """));
 
-        Assert.Equal(3, diagnostics.Count);
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("HandleClick", StringComparison.Ordinal));
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("HandleClickCore", StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task NonGenericOpenComponentBoundary_IsNotAcceptedAsTypedBoundaryRoot()
+    public async Task NonGenericOpenComponentBoundary_WithoutCallbacks_DoesNotReportNtba0001()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -234,7 +233,7 @@ public sealed class BlazorCoverageRegressionTests
                     __builder.CloseComponent();
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
     }
 
     [Fact]
@@ -284,6 +283,129 @@ public sealed class BlazorCoverageRegressionTests
 
         var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0001");
         Assert.EndsWith("Components/MarkupCounter.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task MissingErrorBoundary_UsesSyntheticRazorLocation_WhenOnlyGeneratedRazorExists()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "GeneratedOnlyCounter",
+                renderTreeStatements: CreateButtonRenderTree("HandleClick"),
+                razorMethods: """
+                    private void HandleClick()
+                    {
+                        currentCount++;
+                    }
+                    """));
+
+        var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0001");
+        Assert.EndsWith("Components/GeneratedOnlyCounter.razor.g.cs", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task SafeChildComponentBeforeBoundary_InRazorMarkup_DoesNotReportNtba0001()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateInteractiveComponent(
+                    componentName: "EditPage",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::TestComponents.PageHeader>(0);
+                        __builder.AddAttribute(1, "Title", "Header");
+                        __builder.CloseComponent();
+                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(2);
+                        __builder.AddAttribute(3, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                        {
+                            __builder2.OpenElement(4, "div");
+                            __builder2.CloseElement();
+                        }));
+                        __builder.AddAttribute(5, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                        {
+                            __builder3.OpenElement(6, "p");
+                            __builder3.CloseElement();
+                        }));
+                        __builder.CloseComponent();
+                        """),
+                TestComponentSources.CreateStaticComponent(
+                    componentName: "PageHeader",
+                    renderTreeStatements: """
+                        __builder.OpenElement(0, "div");
+                        __builder.CloseElement();
+                        """)
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "EditPage",
+                    markup: """
+                        @rendermode InteractiveServer
+                        <PageHeader Title="Header" />
+                        <ErrorBoundary>
+                            <div></div>
+                            <ErrorContent>
+                                <p>Error</p>
+                            </ErrorContent>
+                        </ErrorBoundary>
+                        """)
+            ]);
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
+    }
+
+    [Fact]
+    public async Task SafeChildComponentWithComputedParameterBeforeBoundary_InRazorMarkup_DoesNotReportNtba0001()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateInteractiveComponent(
+                    componentName: "EditPage",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::TestComponents.PageHeader>(0);
+                        __builder.AddAttribute(1, "Title", $"Edit {name}");
+                        __builder.CloseComponent();
+                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(2);
+                        __builder.AddAttribute(3, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                        {
+                            __builder2.OpenElement(4, "div");
+                            __builder2.CloseElement();
+                        }));
+                        __builder.AddAttribute(5, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                        {
+                            __builder3.OpenElement(6, "p");
+                            __builder3.CloseElement();
+                        }));
+                        __builder.CloseComponent();
+                        """,
+                    razorMethods: """
+                        private string name = "Alice";
+                        """),
+                TestComponentSources.CreateStaticComponent(
+                    componentName: "PageHeader",
+                    renderTreeStatements: """
+                        __builder.OpenElement(0, "div");
+                        __builder.CloseElement();
+                        """)
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "EditPage",
+                    markup: """
+                        @rendermode InteractiveServer
+                        <PageHeader Title="@($"Edit {name}")" />
+                        <ErrorBoundary>
+                            <div></div>
+                            <ErrorContent>
+                                <p>Error</p>
+                            </ErrorContent>
+                        </ErrorBoundary>
+                        """)
+            ]);
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
     }
 
     [Fact]

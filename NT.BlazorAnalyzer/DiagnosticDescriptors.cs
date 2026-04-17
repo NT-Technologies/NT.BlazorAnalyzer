@@ -9,11 +9,11 @@ internal static class DiagnosticDescriptors
     public static readonly DiagnosticDescriptor MissingErrorBoundary = new(
         id: "NTBA0001",
         title: "Component should be protected by ErrorBoundary",
-        messageFormat: "Component '{0}' should be protected by ErrorBoundary. Wrapping '{1}' first in BuildRenderTree resolves this warning.",
+        messageFormat: "Component '{0}' should be protected by ErrorBoundary. Wrapping '{1}' in an ErrorBoundary resolves this warning. Component to wrap: '{2}'.",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Blazor components in an interactive hierarchy should open ErrorBoundary or a derived component as the first element or component in BuildRenderTree.",
+        description: "Blazor components in an interactive hierarchy should be protected by ErrorBoundary or a derived component at the root of their rendered content.",
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
     public static readonly DiagnosticDescriptor MissingTryCatch = new(

@@ -447,4 +447,483 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
 
         Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("DerivedSelect", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public async Task InteractiveDerivedGenericComponent_SuggestsUnwrappedOwnerInsteadOfLeaf_WhenOtherOwnersAreWrapped()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            new SourceFile(
+                Path: "Components/GenericBaseSelect.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        public partial class GenericBaseSelect<TItem> : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenElement(0, "div");
+                                __builder.CloseElement();
+                            }
+                        }
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/DerivedSelect.cs",
+                Text: """
+                    namespace TestComponents;
+
+                    [DerivedSelect.__PrivateComponentRenderModeAttribute]
+                    public class DerivedSelect : GenericBaseSelect<string>
+                    {
+                        private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                        {
+                            public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer;
+                        }
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "WrappedPage",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.DerivedSelect>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "UnwrappedPage",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.DerivedSelect>(0);
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.Contains(
+            diagnostics,
+            diagnostic => diagnostic.Id == "NTBA0001" &&
+                diagnostic.GetMessage().Contains("Component 'UnwrappedPage'", StringComparison.Ordinal) &&
+                diagnostic.GetMessage().Contains("'UnwrappedPage'", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            diagnostics,
+            diagnostic => diagnostic.Id == "NTBA0001" &&
+                diagnostic.GetMessage().Contains("DerivedSelect", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SharedLeafComponent_WithOnlyInheritedRenderMode_ReportsWrapperComponentsInsteadOfLeaf()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "AssignmentForm",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "form");
+                    __builder.CloseElement();
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "EditAssignmentForm",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.AssignmentForm>(0);
+                    __builder.AddAttribute(1, "OnValidSubmitCallback", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, UpdateAssignmentAsync));
+                    __builder.AddAttribute(2, "FormButtons", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(3, "button");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private void UpdateAssignmentAsync()
+                    {
+                        currentCount++;
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "NewAssignmentForm",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.AssignmentForm>(0);
+                    __builder.AddAttribute(1, "OnValidSubmitCallback", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, CreateAssignmentAsync));
+                    __builder.AddAttribute(2, "FormButtons", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(3, "button");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private void CreateAssignmentAsync()
+                    {
+                        currentCount++;
+                    }
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'EditAssignmentForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'NewAssignmentForm'", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("AssignmentForm'", StringComparison.Ordinal) && !diagnostic.GetMessage().Contains("EditAssignmentForm", StringComparison.Ordinal) && !diagnostic.GetMessage().Contains("NewAssignmentForm", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SharedInteractiveLeafComponent_WithOnlyInheritedRenderMode_ReportsLeafAgainstWrapperOwners()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "FormHost",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "form");
+                    __builder.CloseElement();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "DiaryNoteForm",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.FormHost>(0);
+                    __builder.AddAttribute(1, "OnSubmit", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, SaveAsync));
+                    __builder.AddAttribute(2, "FormButtons", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(3, "button");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private void SaveAsync()
+                    {
+                        currentCount++;
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "EditDiaryNoteForm",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.DiaryNoteForm>(0);
+                    __builder.AddAttribute(1, "OnValidSubmitCallback", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, UpdateDiaryNoteAsync));
+                    __builder.AddAttribute(2, "FormButtons", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(3, "button");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private void UpdateDiaryNoteAsync()
+                    {
+                        currentCount++;
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "NewDiaryNoteForm",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.DiaryNoteForm>(0);
+                    __builder.AddAttribute(1, "OnValidSubmitCallback", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, CreateDiaryNoteAsync));
+                    __builder.AddAttribute(2, "FormButtons", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(3, "button");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private void CreateDiaryNoteAsync()
+                    {
+                        currentCount++;
+                    }
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'EditDiaryNoteForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'NewDiaryNoteForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'DiaryNoteForm'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'EditDiaryNoteForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'DiaryNoteForm'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'NewDiaryNoteForm'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AbstractInteractiveBaseComponent_DoesNotReportNtba0001_WhenConcreteDerivedComponentsAreOwnedByWrappedParent()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            new SourceFile(
+                Path: "Components/ClaimContactListCard.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        [TestComponents.ClaimContactListCard.__PrivateComponentRenderModeAttribute]
+                        public abstract partial class ClaimContactListCard : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenElement(0, "div");
+                                __builder.CloseElement();
+                            }
+
+                            private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                            {
+                                public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                    global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveAuto;
+                            }
+                        }
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/WitnessContactsCard.cs",
+                Text: """
+                    namespace TestComponents;
+
+                    public sealed class WitnessContactsCard : ClaimContactListCard
+                    {
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "ManagementContacts",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.WitnessContactsCard>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("ClaimContactListCard", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("WitnessContactsCard", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ChildDiagnostic_DoesNotSuggestAbstractBaseResolver()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            new SourceFile(
+                Path: "Components/AbstractOwner.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        [TestComponents.AbstractOwner.__PrivateComponentRenderModeAttribute]
+                        public abstract partial class AbstractOwner : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenComponent<global::TestComponents.Editor>(0);
+                                __builder.AddAttribute(1, "Changed", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, HandleChanged));
+                                __builder.CloseComponent();
+                            }
+
+                            private void HandleChanged()
+                            {
+                            }
+
+                            private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                            {
+                                public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                    global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveAuto;
+                            }
+                        }
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Editor",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """),
+            new SourceFile(
+                Path: "Components/ConcreteDerivedOwner.cs",
+                Text: """
+                    namespace TestComponents;
+
+                    public sealed class ConcreteDerivedOwner : AbstractOwner
+                    {
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "OtherOwner",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.Editor>(0);
+                    __builder.AddAttribute(1, "Changed", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, HandleChanged));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private void HandleChanged()
+                    {
+                        currentCount++;
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("AbstractOwner", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ChildComponent_OwnedByAbstractBase_DoesNotReportWhenAllDerivedOwnersAreWrapped()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            new SourceFile(
+                Path: "Components/AbstractOwner.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        [TestComponents.AbstractOwner.__PrivateComponentRenderModeAttribute]
+                        public abstract partial class AbstractOwner : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenComponent<global::TestComponents.Editor>(0);
+                                __builder.AddAttribute(1, "Changed", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, HandleChanged));
+                                __builder.CloseComponent();
+                            }
+
+                            private void HandleChanged()
+                            {
+                            }
+
+                            private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                            {
+                                public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                    global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveAuto;
+                            }
+                        }
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Editor",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """),
+            new SourceFile(
+                Path: "Components/ConcreteDerivedOwnerA.cs",
+                Text: """
+                    namespace TestComponents;
+
+                    public sealed class ConcreteDerivedOwnerA : AbstractOwner
+                    {
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/ConcreteDerivedOwnerB.cs",
+                Text: """
+                    namespace TestComponents;
+
+                    public sealed class ConcreteDerivedOwnerB : AbstractOwner
+                    {
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "WrappedParentA",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.ConcreteDerivedOwnerA>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "WrappedParentB",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.ConcreteDerivedOwnerB>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Editor", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("AbstractOwner", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("ConcreteDerivedOwnerA", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("ConcreteDerivedOwnerB", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RelevantChildOwnedByAbstractBase_DoesNotReportWhenConcreteDerivedOwnersAreCoveredThroughWrappedAncestors()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            new SourceFile(
+                Path: "Components/AbstractOwner.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        [TestComponents.AbstractOwner.__PrivateComponentRenderModeAttribute]
+                        public abstract partial class AbstractOwner : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenComponent<global::TestComponents.Editor>(0);
+                                __builder.CloseComponent();
+                            }
+
+                            private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                            {
+                                public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                    global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveAuto;
+                            }
+                        }
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Editor",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "button");
+                    __builder.AddAttribute(1, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, HandleClick));
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private void HandleClick()
+                    {
+                        currentCount++;
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/ConcreteDerivedOwner.cs",
+                Text: """
+                    namespace TestComponents;
+
+                    public sealed class ConcreteDerivedOwner : AbstractOwner
+                    {
+                    }
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "Tab",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.ConcreteDerivedOwner>(0);
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "WrappedPage",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.Tab>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Editor", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("ConcreteDerivedOwner", StringComparison.Ordinal));
+    }
 }

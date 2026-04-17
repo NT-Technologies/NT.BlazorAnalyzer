@@ -147,6 +147,183 @@ public sealed class BlazorErrorHandlingAnalyzerTests
         Assert.Empty(diagnostics);
     }
 
+    [Fact]
+    public async Task InteractiveComponent_WithOnlyIgnoredHeadContentAndStaticMarkup_DoesNotReportNtba0001()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Forbidden",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.PageTitle>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.AddContent(2, "Forbidden");
+                    }));
+                    __builder.CloseComponent();
+                    __builder.OpenElement(3, "h1");
+                    __builder.AddContent(4, "Forbidden");
+                    __builder.CloseElement();
+                    __builder.OpenElement(5, "p");
+                    __builder.AddContent(6, "Static content");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
+    }
+
+    [Fact]
+    public async Task InteractiveParent_DoesNotReportNtba0001_ForStaticLeafChildWithOnlyIgnoredHeadContentAndMarkup()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.PageHeader>(0);
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "PageHeader",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.PageTitle>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.AddContent(2, "Header");
+                    }));
+                    __builder.CloseComponent();
+                    __builder.OpenElement(3, "div");
+                    __builder.OpenElement(4, "h3");
+                    __builder.AddContent(5, "Header");
+                    __builder.CloseElement();
+                    __builder.CloseElement();
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("PageHeader", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task InteractiveComponent_WithSafeChildComponentBeforeBoundary_DoesNotReportNtba0001()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.PageHeader>(0);
+                    __builder.AddAttribute(1, "Title", "Header");
+                    __builder.CloseComponent();
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(2);
+                    __builder.AddAttribute(3, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(4, "div");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.AddAttribute(5, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(6, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "PageHeader",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
+    }
+
+    [Fact]
+    public async Task InteractiveComponent_WithChildComponentCallbackBeforeBoundary_ReportsNtba0001()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.CallbackChild>(0);
+                    __builder.AddAttribute(1, "OnSave", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, HandleSave));
+                    __builder.CloseComponent();
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(2);
+                    __builder.AddAttribute(3, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(4, "div");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.AddAttribute(5, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(6, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private void HandleSave()
+                    {
+                        currentCount++;
+                    }
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "CallbackChild",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task InteractiveComponent_WithIfElseRoots_RecognizesBoundaryInProtectedBranch()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Edit",
+                renderTreeStatements: """
+                    if (global::System.DateTime.Now.Ticks > 0)
+                    {
+                        __builder.OpenComponent<global::TestComponents.PageHeader>(0);
+                        __builder.AddAttribute(1, "Title", "Edit Contact");
+                        __builder.CloseComponent();
+                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(2);
+                        __builder.AddAttribute(3, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                        {
+                            __builder2.OpenComponent<global::TestComponents.EditContactForm>(4);
+                            __builder2.CloseComponent();
+                        }));
+                        __builder.AddAttribute(5, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                        {
+                            __builder3.OpenElement(6, "p");
+                            __builder3.CloseElement();
+                        }));
+                        __builder.CloseComponent();
+                    }
+                    else
+                    {
+                        __builder.OpenComponent<global::TestComponents.PageHeader>(7);
+                        __builder.AddAttribute(8, "Title", "Contact Not Found");
+                        __builder.CloseComponent();
+                        __builder.OpenElement(9, "p");
+                        __builder.AddContent(10, "The provided contact could not be found.");
+                        __builder.CloseElement();
+                    }
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "PageHeader",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "EditContactForm",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "form");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Edit'", StringComparison.Ordinal));
+    }
+
 
     [Fact]
     public async Task InteractiveComponent_WithInertHtmlRootAroundBoundary_DoesNotReportDiagnostics()
@@ -221,7 +398,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
     }
 
     [Fact]
-    public async Task InteractiveComponent_WithBoundaryRootThenUnprotectedComponentRoot_ReportsDiagnostics()
+    public async Task InteractiveComponent_WithBoundaryRootThenSafeComponentRoot_DoesNotReportDiagnostics()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -249,9 +426,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Equal(2, diagnostics.Count);
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'MultipleRootComponent'", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Counter'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'MultipleRootComponent'", StringComparison.Ordinal));
+        Assert.Empty(diagnostics);
     }
 
     [Fact]
@@ -711,7 +886,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
     }
 
     [Fact]
-    public async Task InteractiveHierarchy_SharedRenderMode_WarnsOnAllLevels_AndTopBoundaryCoversWholeTree()
+    public async Task InteractiveHierarchy_SharedRenderMode_ReportsChildrenButResolvesToTopLevelOwner_AndTopBoundaryCoversWholeTree()
     {
         var unwrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -733,10 +908,10 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Equal(3, unwrappedDiagnostics.Count);
+        Assert.Equal(2, unwrappedDiagnostics.Count);
         Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal));
         Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Child'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Page'", StringComparison.Ordinal));
-        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Page'", StringComparison.Ordinal));
+        Assert.DoesNotContain(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal));
 
         var wrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -772,7 +947,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
     }
 
     [Fact]
-    public async Task StaticPage_WithInteractiveDescendants_WarnsOnAllLevels_AndCoverageStopsAtRenderModeBoundary()
+    public async Task StaticPage_WithInteractiveDescendants_DoesNotWarnOnStaticLeafDescendants_AndCoverageStopsAtRenderModeBoundary()
     {
         var unwrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateStaticComponent(
@@ -794,10 +969,10 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Equal(3, unwrappedDiagnostics.Count);
+        Assert.Equal(2, unwrappedDiagnostics.Count);
         Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Page'", StringComparison.Ordinal));
         Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Child'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Child'", StringComparison.Ordinal));
-        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Child'", StringComparison.Ordinal));
+        Assert.DoesNotContain(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal));
 
         var pageWrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateStaticComponent(
@@ -829,10 +1004,10 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Equal(2, pageWrappedDiagnostics.Count);
+        Assert.Single(pageWrappedDiagnostics);
         Assert.DoesNotContain(pageWrappedDiagnostics, diagnostic => diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal));
         Assert.Contains(pageWrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Child'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Child'", StringComparison.Ordinal));
-        Assert.Contains(pageWrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Child'", StringComparison.Ordinal));
+        Assert.DoesNotContain(pageWrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal));
 
         var childWrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateStaticComponent(
