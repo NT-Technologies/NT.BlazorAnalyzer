@@ -11,3 +11,5 @@ NTBA0006 | Reliability | Warning | JS interop before OnAfterRender should be gua
 NTBA0007 | Reliability | Warning | Interactive component methods should not be async void.
 NTBA0008 | Reliability | Warning | Catch blocks in interactive components should log, track, or rethrow exceptions.
 NTBA0009 | Reliability | Warning | Root ErrorBoundary should provide ErrorContent.
+NTBA0010 | Reliability | Warning | Layout-level ErrorBoundary should be keyed by route, reset on navigation, or moved down to page/widget scope.
+NTBA0011 | Reliability | Warning | Layout-level ErrorBoundary route key should update on navigation instead of snapshotting the route once.

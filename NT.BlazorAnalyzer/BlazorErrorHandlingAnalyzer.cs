@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Diagnostics;
+using Microsoft.CodeAnalysis.Text;
 
 namespace NT.BlazorAnalyzer;
 
@@ -22,7 +23,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         DiagnosticDescriptors.JsInteropRequiresInteractivityGuard,
         DiagnosticDescriptors.AsyncVoidMethod,
         DiagnosticDescriptors.CatchWithoutLogging,
-        DiagnosticDescriptors.ErrorBoundaryMissingErrorContent
+        DiagnosticDescriptors.ErrorBoundaryMissingErrorContent,
+        DiagnosticDescriptors.LayoutBoundaryShouldBeRouteKeyed,
+        DiagnosticDescriptors.LayoutBoundaryUsesStaleRouteKey
     ];
 
     public override void Initialize(AnalysisContext context)
@@ -33,18 +36,21 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         context.RegisterCompilationStartAction(static compilationStartContext =>
         {
             var componentBaseSymbol = compilationStartContext.Compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.ComponentBase");
+            var layoutComponentBaseSymbol = compilationStartContext.Compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.LayoutComponentBase");
             var errorBoundarySymbol = compilationStartContext.Compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.Web.ErrorBoundary");
             var renderModeAttributeSymbol = compilationStartContext.Compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.RenderModeAttribute");
 
-            if (componentBaseSymbol is null || errorBoundarySymbol is null || renderModeAttributeSymbol is null)
+            if (componentBaseSymbol is null || layoutComponentBaseSymbol is null || errorBoundarySymbol is null || renderModeAttributeSymbol is null)
             {
                 return;
             }
 
             var interactiveComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var allComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
+            var layoutComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var declaredRenderModes = new ConcurrentDictionary<INamedTypeSymbol, string?>(SymbolEqualityComparer.Default);
             var localBoundaryComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
+            var rootBoundaryKeyedComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var localRelevantBoundaryComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var boundaryWithErrorContentComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var boundaryComponentsWithBuiltInErrorContent = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
@@ -71,10 +77,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 symbolContext => CollectCandidateComponent(
                     symbolContext,
                     componentBaseSymbol,
+                    layoutComponentBaseSymbol,
                     errorBoundarySymbol,
                     renderModeAttributeSymbol,
                     interactiveComponents,
                     allComponents,
+                    layoutComponents,
                     declaredRenderModes,
                     boundaryComponentNames),
                 SymbolKind.NamedType);
@@ -87,8 +95,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     return;
                 }
 
-                var localBuildRenderTreeRootMethods = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
-                var localMethodAnalyses = new Dictionary<IMethodSymbol, MethodAnalysis>(SymbolEqualityComparer.Default);
+                var localBuildRenderTreeRootMethods = new ConcurrentDictionary<IMethodSymbol, byte>(SymbolEqualityComparer.Default);
+                var localMethodAnalyses = new ConcurrentDictionary<IMethodSymbol, MethodAnalysis>(SymbolEqualityComparer.Default);
 
                 symbolStartContext.RegisterSyntaxNodeAction(
                     syntaxContext => CollectLocalMissingTryCatchAnalysis(
@@ -113,6 +121,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 syntaxContext => CollectMethodAnalysis(
                     syntaxContext,
                     componentBaseSymbol,
+                    layoutComponentBaseSymbol,
                     errorBoundarySymbol,
                     renderModeAttributeSymbol,
                     allComponents,
@@ -121,6 +130,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     boundaryWithErrorContentComponents,
                     boundaryComponentsWithBuiltInErrorContent,
                     rootBoundaryComponents,
+                    rootBoundaryKeyedComponents,
                     componentOwners,
                     buildRenderTreeRootMethods,
                     methodAnalyses,
@@ -143,6 +153,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     boundaryWithErrorContentComponents,
                     boundaryComponentsWithBuiltInErrorContent,
                     rootBoundaryComponents,
+                    rootBoundaryKeyedComponents,
+                    layoutComponents,
                     componentOwners,
                     buildRenderTreeRootMethods,
                     methodAnalyses,
@@ -156,10 +168,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static void CollectCandidateComponent(
         SymbolAnalysisContext context,
         INamedTypeSymbol componentBaseSymbol,
+        INamedTypeSymbol layoutComponentBaseSymbol,
         INamedTypeSymbol errorBoundarySymbol,
         INamedTypeSymbol renderModeAttributeSymbol,
         ConcurrentDictionary<INamedTypeSymbol, byte> interactiveComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> allComponents,
+        ConcurrentDictionary<INamedTypeSymbol, byte> layoutComponents,
         ConcurrentDictionary<INamedTypeSymbol, string?> declaredRenderModes,
         ConcurrentDictionary<string, byte> boundaryComponentNames)
     {
@@ -175,6 +189,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         allComponents.TryAdd(namedType, 0);
+        if (namedType.InheritsFromOrEquals(layoutComponentBaseSymbol))
+        {
+            layoutComponents.TryAdd(namedType, 0);
+        }
+
         var declaredRenderMode = GetDeclaredRenderModeKey(namedType, renderModeAttributeSymbol);
         declaredRenderModes.TryAdd(namedType, declaredRenderMode);
         if (declaredRenderMode is not null)
@@ -186,6 +205,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static void CollectMethodAnalysis(
         SyntaxNodeAnalysisContext context,
         INamedTypeSymbol componentBaseSymbol,
+        INamedTypeSymbol layoutComponentBaseSymbol,
         INamedTypeSymbol errorBoundarySymbol,
         INamedTypeSymbol renderModeAttributeSymbol,
         ConcurrentDictionary<INamedTypeSymbol, byte> allComponents,
@@ -194,6 +214,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ConcurrentDictionary<INamedTypeSymbol, byte> boundaryWithErrorContentComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> boundaryComponentsWithBuiltInErrorContent,
         ConcurrentDictionary<INamedTypeSymbol, INamedTypeSymbol> rootBoundaryComponents,
+        ConcurrentDictionary<INamedTypeSymbol, byte> rootBoundaryKeyedComponents,
         ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners,
         ConcurrentDictionary<IMethodSymbol, byte> buildRenderTreeRootMethods,
         ConcurrentDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses,
@@ -247,16 +268,19 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 razorAdditionalFiles,
                 razorMarkupCache,
                 context.CancellationToken);
-            var hasBoundaryRoot = razorMarkupAnalysis?.HasBoundaryRoot ?? renderTreeAnalysis.HasBoundaryRoot;
-            var boundaryRootHasErrorContent = razorMarkupAnalysis?.BoundaryRootHasErrorContent ?? renderTreeAnalysis.BoundaryRootHasErrorContent;
-            var hasUnprotectedRoot = razorMarkupAnalysis?.FirstUnprotectedRootLocation is not null ||
-                renderTreeAnalysis.FirstUnprotectedRootLocation is not null;
+            var combinedRootAnalysis = CombineRootAnalysis(
+                renderTreeAnalysis,
+                razorMarkupAnalysis,
+                containingType.GetPreferredSourceLocation());
+            var hasBoundaryRoot = combinedRootAnalysis.HasBoundaryRoot;
+            var boundaryRootHasErrorContent = combinedRootAnalysis.BoundaryRootHasErrorContent;
+            var rootBoundaryIsKeyed = combinedRootAnalysis.RootBoundaryIsKeyed;
+            var rootBoundaryUsesStaleRouteKey = combinedRootAnalysis.RootBoundaryUsesStaleRouteKey;
+            var hasUnprotectedRoot = combinedRootAnalysis.FirstUnprotectedRootLocation is not null;
             var hasRelevantChildren = renderTreeAnalysis.ChildComponents.Count > 0;
-            var missingBoundaryLocation = razorMarkupAnalysis?.FirstUnprotectedRootLocation ??
-                renderTreeAnalysis.FirstUnprotectedRootLocation ??
+            var missingBoundaryLocation = combinedRootAnalysis.FirstUnprotectedRootLocation ??
                 containingType.GetPreferredSourceLocation();
-            var boundaryLocation = razorMarkupAnalysis?.BoundaryRootLocation ??
-                renderTreeAnalysis.BoundaryRootLocation ??
+            var boundaryLocation = combinedRootAnalysis.BoundaryRootLocation ??
                 containingType.GetPreferredSourceLocation();
 
             componentDiagnosticLocations[containingType] = new ComponentDiagnosticLocations(
@@ -279,10 +303,37 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             if (hasBoundaryRoot)
             {
                 localBoundaryComponents.TryAdd(containingType, 0);
+                if (rootBoundaryIsKeyed)
+                {
+                    rootBoundaryKeyedComponents.TryAdd(containingType, 0);
+                }
+
                 if (boundaryRootHasErrorContent)
                 {
                     boundaryWithErrorContentComponents.TryAdd(containingType, 0);
                 }
+            }
+
+            if (containingType.InheritsFromOrEquals(layoutComponentBaseSymbol) &&
+                hasBoundaryRoot &&
+                !rootBoundaryIsKeyed &&
+                boundaryLocation is not null)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    DiagnosticDescriptors.LayoutBoundaryShouldBeRouteKeyed,
+                    containingType.PreferNonGeneratedSourceLocation(boundaryLocation) ?? boundaryLocation,
+                    containingType.Name));
+            }
+
+            if (containingType.InheritsFromOrEquals(layoutComponentBaseSymbol) &&
+                hasBoundaryRoot &&
+                rootBoundaryUsesStaleRouteKey &&
+                boundaryLocation is not null)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    DiagnosticDescriptors.LayoutBoundaryUsesStaleRouteKey,
+                    containingType.PreferNonGeneratedSourceLocation(boundaryLocation) ?? boundaryLocation,
+                    containingType.Name));
             }
 
             foreach (var referencedMethod in GetBuildRenderTreeReferencedMethods(methodDeclaration, context.SemanticModel, containingType, context.CancellationToken))
@@ -381,8 +432,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         SyntaxNodeAnalysisContext context,
         INamedTypeSymbol componentBaseSymbol,
         INamedTypeSymbol componentSymbol,
-        HashSet<IMethodSymbol> localBuildRenderTreeRootMethods,
-        Dictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses)
+        ConcurrentDictionary<IMethodSymbol, byte> localBuildRenderTreeRootMethods,
+        ConcurrentDictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses)
     {
         if (context.Node is not MethodDeclarationSyntax methodDeclaration ||
             TryGetDeclaredMethodSymbol(methodDeclaration, context.SemanticModel, context.CancellationToken) is not IMethodSymbol declaredMethod)
@@ -401,7 +452,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         {
             foreach (var referencedMethod in GetBuildRenderTreeReferencedMethods(methodDeclaration, context.SemanticModel, componentSymbol, context.CancellationToken))
             {
-                localBuildRenderTreeRootMethods.Add(referencedMethod);
+                localBuildRenderTreeRootMethods.TryAdd(referencedMethod, 0);
             }
 
             return;
@@ -418,8 +469,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static void ReportLocalMissingTryCatchDiagnostics(
         SymbolAnalysisContext context,
         INamedTypeSymbol componentSymbol,
-        HashSet<IMethodSymbol> localBuildRenderTreeRootMethods,
-        Dictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses,
+        ConcurrentDictionary<IMethodSymbol, byte> localBuildRenderTreeRootMethods,
+        ConcurrentDictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses,
         ConcurrentDictionary<IMethodSymbol, byte> locallyReportedMissingTryCatchMethods,
         BoundaryCoverageResolver boundaryCoverageResolver)
     {
@@ -434,7 +485,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             .Distinct<IMethodSymbol>(SymbolEqualityComparer.Default)
             .ToArray();
         var rootMethods = methods
-            .Where(method => localMethodAnalyses[method].IsApiRootCandidate || localBuildRenderTreeRootMethods.Contains(method))
+            .Where(method => localMethodAnalyses[method].IsApiRootCandidate || localBuildRenderTreeRootMethods.ContainsKey(method))
             .Distinct<IMethodSymbol>(SymbolEqualityComparer.Default)
             .ToArray();
         var methodsWithSpecificTryCatchDiagnostics = methods
@@ -473,6 +524,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ConcurrentDictionary<INamedTypeSymbol, byte> boundaryWithErrorContentComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> boundaryComponentsWithBuiltInErrorContent,
         ConcurrentDictionary<INamedTypeSymbol, INamedTypeSymbol> rootBoundaryComponents,
+        ConcurrentDictionary<INamedTypeSymbol, byte> rootBoundaryKeyedComponents,
+        ConcurrentDictionary<INamedTypeSymbol, byte> layoutComponents,
         ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners,
         ConcurrentDictionary<IMethodSymbol, byte> buildRenderTreeRootMethods,
         ConcurrentDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses,
@@ -573,8 +626,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                         component.Name));
                 }
             }
-
         }
+
     }
 
     private static Dictionary<INamedTypeSymbol, ImmutableHashSet<string>> ComputeEffectiveRenderModes(
@@ -1098,9 +1151,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 path,
                 candidatePath =>
                 {
-                    if (razorAdditionalFiles.TryGetValue(candidatePath, out var additionalText))
+                    if (TryGetRazorAdditionalFileText(candidatePath, razorAdditionalFiles, cancellationToken) is { } sourceText)
                     {
-                        return additionalText.GetText(cancellationToken);
+                        return sourceText;
                     }
 
                     return null;
@@ -1126,6 +1179,76 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         return methodSymbol.TryGetRazorFilePath();
+    }
+
+    private static CombinedRootAnalysis CombineRootAnalysis(
+        RenderTreeAnalysis generatedAnalysis,
+        RazorMarkupAnalysis? razorAnalysis,
+        Location? defaultLocation)
+    {
+        if (razorAnalysis is null)
+        {
+            return new CombinedRootAnalysis(
+                generatedAnalysis.HasBoundaryRoot,
+                generatedAnalysis.BoundaryRootHasErrorContent,
+                generatedAnalysis.RootBoundaryIsKeyed,
+                generatedAnalysis.RootBoundaryUsesStaleRouteKey,
+                generatedAnalysis.FirstUnprotectedRootLocation,
+                generatedAnalysis.BoundaryRootLocation ?? defaultLocation);
+        }
+
+        var generatedHasTrustedBoundaryRoot =
+            generatedAnalysis.HasBoundaryRoot &&
+            generatedAnalysis.FirstUnprotectedRootLocation is null;
+
+        if (generatedHasTrustedBoundaryRoot)
+        {
+            return new CombinedRootAnalysis(
+                hasBoundaryRoot: true,
+                boundaryRootHasErrorContent: generatedAnalysis.BoundaryRootHasErrorContent,
+                rootBoundaryIsKeyed: generatedAnalysis.RootBoundaryIsKeyed,
+                rootBoundaryUsesStaleRouteKey: generatedAnalysis.RootBoundaryUsesStaleRouteKey,
+                firstUnprotectedRootLocation: null,
+                boundaryRootLocation: razorAnalysis.BoundaryRootLocation ??
+                    generatedAnalysis.BoundaryRootLocation ??
+                    defaultLocation);
+        }
+
+        return new CombinedRootAnalysis(
+            hasBoundaryRoot: generatedAnalysis.HasBoundaryRoot || razorAnalysis.HasBoundaryRoot,
+            boundaryRootHasErrorContent: (!generatedAnalysis.HasBoundaryRoot || generatedAnalysis.BoundaryRootHasErrorContent) &&
+                (!razorAnalysis.HasBoundaryRoot || razorAnalysis.BoundaryRootHasErrorContent),
+            rootBoundaryIsKeyed: (!generatedAnalysis.HasBoundaryRoot || generatedAnalysis.RootBoundaryIsKeyed) &&
+                (!razorAnalysis.HasBoundaryRoot || razorAnalysis.BoundaryRootIsKeyed),
+            rootBoundaryUsesStaleRouteKey: generatedAnalysis.RootBoundaryUsesStaleRouteKey,
+            firstUnprotectedRootLocation: razorAnalysis.FirstUnprotectedRootLocation ??
+                generatedAnalysis.FirstUnprotectedRootLocation,
+            boundaryRootLocation: razorAnalysis.BoundaryRootLocation ??
+                generatedAnalysis.BoundaryRootLocation ??
+                defaultLocation);
+    }
+
+    private static SourceText? TryGetRazorAdditionalFileText(
+        string candidatePath,
+        ImmutableDictionary<string, AdditionalText> razorAdditionalFiles,
+        CancellationToken cancellationToken)
+    {
+        if (razorAdditionalFiles.TryGetValue(candidatePath, out var additionalText))
+        {
+            return additionalText.GetText(cancellationToken);
+        }
+
+        var normalizedCandidatePath = candidatePath.Replace('/', '\\').TrimStart('\\');
+        foreach (var pair in razorAdditionalFiles)
+        {
+            var normalizedAdditionalPath = pair.Key.Replace('/', '\\');
+            if (normalizedAdditionalPath.EndsWith(normalizedCandidatePath, StringComparison.OrdinalIgnoreCase))
+            {
+                return pair.Value.GetText(cancellationToken);
+            }
+        }
+
+        return null;
     }
 
     private static bool IsRenderMethod(IMethodSymbol methodSymbol)
@@ -1338,6 +1461,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         var hasUnprotectedInteractiveRoot = false;
         var hasBoundaryProtectedContent = false;
         var boundaryRootHasErrorContent = true;
+        var rootBoundaryIsKeyed = true;
+        var rootBoundaryUsesStaleRouteKey = false;
         INamedTypeSymbol? rootBoundaryComponent = null;
         Location? firstUnprotectedRootLocation = null;
         Location? boundaryRootLocation = null;
@@ -1352,6 +1477,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     ref hasUnprotectedInteractiveRoot,
                     ref hasBoundaryProtectedContent,
                     ref boundaryRootHasErrorContent,
+                    ref rootBoundaryIsKeyed,
+                    ref rootBoundaryUsesStaleRouteKey,
                     ref rootBoundaryComponent,
                     ref firstUnprotectedRootLocation,
                     ref boundaryRootLocation);
@@ -1396,6 +1523,10 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     currentRoot?.AnalyzeAttribute(invocation, semanticModel, cancellationToken);
                     break;
 
+                case "SetKey":
+                    currentRoot?.AnalyzeSetKey(invocation, semanticModel, cancellationToken);
+                    break;
+
                 case "CloseComponent":
                 case "CloseElement":
                     if (currentRoot is null)
@@ -1409,6 +1540,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                         hasUnprotectedInteractiveRoot |= currentRoot.HasUnprotectedInteractiveContent;
                         hasBoundaryProtectedContent |= currentRoot.HasBoundaryProtectedContent;
                         boundaryRootHasErrorContent &= !currentRoot.HasBoundaryMissingErrorContent;
+                        rootBoundaryIsKeyed &= currentRoot.RootBoundaryIsKeyed;
+                        rootBoundaryUsesStaleRouteKey |= currentRoot.RootBoundaryUsesStaleRouteKey;
                         rootBoundaryComponent ??= currentRoot.RootBoundaryComponent;
                         firstUnprotectedRootLocation ??= currentRoot.FirstUnprotectedContentLocation;
                         boundaryRootLocation ??= currentRoot.RootBoundaryLocation;
@@ -1426,6 +1559,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 ref hasUnprotectedInteractiveRoot,
                 ref hasBoundaryProtectedContent,
                 ref boundaryRootHasErrorContent,
+                ref rootBoundaryIsKeyed,
+                ref rootBoundaryUsesStaleRouteKey,
                 ref rootBoundaryComponent,
                 ref firstUnprotectedRootLocation,
                 ref boundaryRootLocation);
@@ -1434,6 +1569,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return new RenderTreeAnalysis(
             hasBoundaryRoot: hasBoundaryProtectedContent && !hasUnprotectedInteractiveRoot,
             boundaryRootHasErrorContent,
+            rootBoundaryIsKeyed,
+            rootBoundaryUsesStaleRouteKey,
             rootBoundaryComponent,
             childComponents,
             firstUnprotectedRootLocation,
@@ -1469,6 +1606,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         var hasUnprotectedInteractiveRoot = false;
         var hasBoundaryProtectedContent = false;
         var boundaryRootHasErrorContent = true;
+        var rootBoundaryIsKeyed = true;
+        var rootBoundaryUsesStaleRouteKey = false;
         INamedTypeSymbol? rootBoundaryComponent = null;
         Location? firstUnprotectedRootLocation = null;
         Location? boundaryRootLocation = null;
@@ -1478,6 +1617,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             ref hasUnprotectedInteractiveRoot,
             ref hasBoundaryProtectedContent,
             ref boundaryRootHasErrorContent,
+            ref rootBoundaryIsKeyed,
+            ref rootBoundaryUsesStaleRouteKey,
             ref rootBoundaryComponent,
             ref firstUnprotectedRootLocation,
             ref boundaryRootLocation);
@@ -1486,6 +1627,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             ref hasUnprotectedInteractiveRoot,
             ref hasBoundaryProtectedContent,
             ref boundaryRootHasErrorContent,
+            ref rootBoundaryIsKeyed,
+            ref rootBoundaryUsesStaleRouteKey,
             ref rootBoundaryComponent,
             ref firstUnprotectedRootLocation,
             ref boundaryRootLocation);
@@ -1493,6 +1636,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return new RenderTreeAnalysis(
             hasBoundaryRoot: hasBoundaryProtectedContent && !hasUnprotectedInteractiveRoot,
             boundaryRootHasErrorContent,
+            rootBoundaryIsKeyed,
+            rootBoundaryUsesStaleRouteKey,
             rootBoundaryComponent,
             childComponents,
             firstUnprotectedRootLocation,
@@ -1507,6 +1652,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ref bool hasUnprotectedInteractiveRoot,
         ref bool hasBoundaryProtectedContent,
         ref bool boundaryRootHasErrorContent,
+        ref bool rootBoundaryIsKeyed,
+        ref bool rootBoundaryUsesStaleRouteKey,
         ref INamedTypeSymbol? rootBoundaryComponent,
         ref Location? firstUnprotectedRootLocation,
         ref Location? boundaryRootLocation)
@@ -1514,6 +1661,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         hasUnprotectedInteractiveRoot |= analysis.FirstUnprotectedRootLocation is not null;
         hasBoundaryProtectedContent |= analysis.HasBoundaryRoot || analysis.RootBoundaryComponent is not null;
         boundaryRootHasErrorContent &= analysis.BoundaryRootHasErrorContent;
+        if (analysis.HasBoundaryRoot || analysis.RootBoundaryComponent is not null)
+        {
+            rootBoundaryIsKeyed &= analysis.RootBoundaryIsKeyed;
+        }
+        rootBoundaryUsesStaleRouteKey |= analysis.RootBoundaryUsesStaleRouteKey;
+
         rootBoundaryComponent ??= analysis.RootBoundaryComponent;
         firstUnprotectedRootLocation ??= analysis.FirstUnprotectedRootLocation;
         boundaryRootLocation ??= analysis.BoundaryRootLocation;
@@ -1524,6 +1677,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ref bool hasUnprotectedInteractiveRoot,
         ref bool hasBoundaryProtectedContent,
         ref bool boundaryRootHasErrorContent,
+        ref bool rootBoundaryIsKeyed,
+        ref bool rootBoundaryUsesStaleRouteKey,
         ref INamedTypeSymbol? rootBoundaryComponent,
         ref Location? firstUnprotectedRootLocation,
         ref Location? boundaryRootLocation)
@@ -1531,6 +1686,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         hasUnprotectedInteractiveRoot |= rootAnalysisState.HasUnprotectedInteractiveContent;
         hasBoundaryProtectedContent |= rootAnalysisState.HasBoundaryProtectedContent;
         boundaryRootHasErrorContent &= !rootAnalysisState.HasBoundaryMissingErrorContent;
+        rootBoundaryIsKeyed &= rootAnalysisState.RootBoundaryIsKeyed;
+        rootBoundaryUsesStaleRouteKey |= rootAnalysisState.RootBoundaryUsesStaleRouteKey;
         rootBoundaryComponent ??= rootAnalysisState.RootBoundaryComponent;
         firstUnprotectedRootLocation ??= rootAnalysisState.FirstUnprotectedContentLocation;
         boundaryRootLocation ??= rootAnalysisState.RootBoundaryLocation;
@@ -1542,6 +1699,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         private int activeBoundaryCount;
         private bool rootBoundaryMissingErrorContent;
         private bool rootBoundaryHasErrorContent;
+        private bool rootBoundaryIsKeyed;
+        private bool rootBoundaryUsesStaleRouteKey;
 
         private RootAnalysisState(
             bool ignoredRoot,
@@ -1575,6 +1734,10 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         public bool HasBoundaryMissingErrorContent => rootBoundaryMissingErrorContent;
 
         public bool IsComplete => nodeStack.Count == 0;
+
+        public bool RootBoundaryIsKeyed => !BoundaryRoot || rootBoundaryIsKeyed;
+
+        public bool RootBoundaryUsesStaleRouteKey => BoundaryRoot && rootBoundaryUsesStaleRouteKey;
 
         public Location? RootBoundaryLocation { get; }
 
@@ -1652,6 +1815,24 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             if (HasCallbackLikeComponentAttribute(invocation, semanticModel, cancellationToken))
             {
                 MarkUnprotectedInteractiveContent(invocation.GetLocation());
+            }
+        }
+
+        public void AnalyzeSetKey(
+            InvocationExpressionSyntax invocation,
+            SemanticModel semanticModel,
+            CancellationToken cancellationToken)
+        {
+            if (BoundaryRoot && nodeStack.Count == 1)
+            {
+                rootBoundaryIsKeyed = true;
+                if (invocation.ArgumentList.Arguments.Count > 0)
+                {
+                    rootBoundaryUsesStaleRouteKey = IsStaleLayoutBoundaryKeyExpression(
+                        invocation.ArgumentList.Arguments[invocation.ArgumentList.Arguments.Count - 1].Expression,
+                        semanticModel,
+                        cancellationToken);
+                }
             }
         }
 
@@ -2186,6 +2367,178 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return TryGetTypeInfo(genericName.TypeArgumentList.Arguments[0], semanticModel, cancellationToken)?.Type as INamedTypeSymbol;
     }
 
+    private static bool IsStaleLayoutBoundaryKeyExpression(
+        ExpressionSyntax expression,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        var visitedSymbols = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        return AnalyzeLayoutBoundaryKeyExpression(expression, semanticModel, cancellationToken, visitedSymbols) ==
+            LayoutBoundaryKeyAnalysis.StaleNavigationSnapshot;
+    }
+
+    private static LayoutBoundaryKeyAnalysis AnalyzeLayoutBoundaryKeyExpression(
+        ExpressionSyntax expression,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken,
+        HashSet<ISymbol> visitedSymbols)
+    {
+        if (IsNavigationReactiveRouteExpression(expression))
+        {
+            return LayoutBoundaryKeyAnalysis.NavigationReactive;
+        }
+
+        var symbol = TryGetSymbol(expression, semanticModel, cancellationToken);
+        if (symbol is null || !visitedSymbols.Add(symbol))
+        {
+            return LayoutBoundaryKeyAnalysis.Unknown;
+        }
+
+        try
+        {
+            return symbol switch
+            {
+                IPropertySymbol propertySymbol => AnalyzeLayoutBoundaryKeyProperty(propertySymbol, cancellationToken, visitedSymbols),
+                IFieldSymbol fieldSymbol => AnalyzeLayoutBoundaryKeyField(fieldSymbol, cancellationToken),
+                _ => LayoutBoundaryKeyAnalysis.Unknown
+            };
+        }
+        finally
+        {
+            visitedSymbols.Remove(symbol);
+        }
+    }
+
+    private static LayoutBoundaryKeyAnalysis AnalyzeLayoutBoundaryKeyProperty(
+        IPropertySymbol propertySymbol,
+        CancellationToken cancellationToken,
+        HashSet<ISymbol> visitedSymbols)
+    {
+        foreach (var syntaxReference in propertySymbol.DeclaringSyntaxReferences)
+        {
+            if (syntaxReference.GetSyntax(cancellationToken) is not PropertyDeclarationSyntax propertyDeclaration)
+            {
+                continue;
+            }
+
+            var expression = propertyDeclaration.ExpressionBody?.Expression ??
+                propertyDeclaration.AccessorList?.Accessors
+                    .FirstOrDefault(static accessor => accessor.IsKind(SyntaxKind.GetAccessorDeclaration))?
+                    .Body?
+                    .Statements
+                    .OfType<ReturnStatementSyntax>()
+                    .FirstOrDefault()?
+                    .Expression;
+
+            if (expression is null)
+            {
+                continue;
+            }
+
+            if (IsNavigationReactiveRouteExpression(expression))
+            {
+                return LayoutBoundaryKeyAnalysis.NavigationReactive;
+            }
+
+            if (TryResolveReferencedField(propertySymbol.ContainingType, expression) is { } referencedField)
+            {
+                var analysis = AnalyzeLayoutBoundaryKeyField(referencedField, cancellationToken);
+                if (analysis is LayoutBoundaryKeyAnalysis.NavigationReactive or LayoutBoundaryKeyAnalysis.StaleNavigationSnapshot)
+                {
+                    return analysis;
+                }
+            }
+
+        }
+
+        return LayoutBoundaryKeyAnalysis.Unknown;
+    }
+
+    private static LayoutBoundaryKeyAnalysis AnalyzeLayoutBoundaryKeyField(
+        IFieldSymbol fieldSymbol,
+        CancellationToken cancellationToken)
+    {
+        var hasAssignment = false;
+        foreach (var syntaxReference in fieldSymbol.ContainingType.DeclaringSyntaxReferences)
+        {
+            var typeDeclaration = syntaxReference.GetSyntax(cancellationToken);
+
+            foreach (var assignment in typeDeclaration.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+            {
+                if (!IsFieldAssignmentTarget(assignment.Left, fieldSymbol))
+                {
+                    continue;
+                }
+
+                hasAssignment = true;
+                if (assignment.FirstAncestorOrSelf<MethodDeclarationSyntax>() is not { } methodDeclaration ||
+                    methodDeclaration.Identifier.ValueText is not ("OnInitialized" or "OnInitializedAsync") ||
+                    !IsNavigationReactiveRouteExpression(assignment.Right))
+                {
+                    return LayoutBoundaryKeyAnalysis.Unknown;
+                }
+            }
+        }
+
+        return hasAssignment
+            ? LayoutBoundaryKeyAnalysis.StaleNavigationSnapshot
+            : LayoutBoundaryKeyAnalysis.Unknown;
+    }
+
+    private static IFieldSymbol? TryResolveReferencedField(INamedTypeSymbol containingType, ExpressionSyntax expression)
+    {
+        var referencedName = expression switch
+        {
+            IdentifierNameSyntax identifierName => identifierName.Identifier.ValueText,
+            MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText,
+            _ => null
+        };
+
+        return referencedName is null
+            ? null
+            : containingType.GetMembers(referencedName).OfType<IFieldSymbol>().FirstOrDefault();
+    }
+
+    private static bool IsFieldAssignmentTarget(ExpressionSyntax left, IFieldSymbol fieldSymbol) =>
+        left switch
+        {
+            IdentifierNameSyntax identifierName => identifierName.Identifier.ValueText == fieldSymbol.Name,
+            MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText == fieldSymbol.Name,
+            _ => false
+        };
+
+    private static bool IsNavigationReactiveRouteExpression(ExpressionSyntax expression) =>
+        expression switch
+        {
+            InvocationExpressionSyntax invocation => IsNavigationRouteInvocation(invocation),
+            MemberAccessExpressionSyntax memberAccess => IsNavigationUriMemberAccess(memberAccess),
+            _ => false
+        };
+
+    private static bool IsNavigationUriMemberAccess(MemberAccessExpressionSyntax memberAccess)
+    {
+        if (memberAccess.Name.Identifier.ValueText != "Uri")
+        {
+            return false;
+        }
+
+        var receiverText = memberAccess.Expression.ToString();
+        return receiverText.IndexOf("nav", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            receiverText.IndexOf("navigation", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static bool IsNavigationRouteInvocation(InvocationExpressionSyntax invocation) =>
+        invocation.Expression switch
+        {
+            MemberAccessExpressionSyntax memberAccess when memberAccess.Name.Identifier.ValueText == "ToBaseRelativePath" &&
+                invocation.ArgumentList.Arguments.Count > 0 =>
+                IsNavigationReactiveRouteExpression(invocation.ArgumentList.Arguments[0].Expression),
+            IdentifierNameSyntax identifierName when identifierName.Identifier.ValueText == "ToBaseRelativePath" &&
+                invocation.ArgumentList.Arguments.Count > 0 =>
+                IsNavigationReactiveRouteExpression(invocation.ArgumentList.Arguments[0].Expression),
+            _ => false
+        };
+
     private static Optional<object?> TryGetConstantValue(
         ExpressionSyntax expression,
         SemanticModel semanticModel,
@@ -2405,6 +2758,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             var childComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
             var hasBoundaryRoot = false;
             var boundaryRootHasErrorContent = true;
+            var rootBoundaryIsKeyed = true;
+            var rootBoundaryUsesStaleRouteKey = false;
             INamedTypeSymbol? rootBoundaryComponent = null;
             Location? firstUnprotectedRootLocation = null;
             Location? boundaryRootLocation = null;
@@ -2429,12 +2784,22 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                         razorAdditionalFiles,
                         razorMarkupCache,
                         cancellationToken);
+                var combinedRootAnalysis = CombineRootAnalysis(
+                    generatedAnalysis,
+                    razorAnalysis,
+                    componentSymbol.GetPreferredSourceLocation());
 
-                hasBoundaryRoot |= razorAnalysis?.HasBoundaryRoot ?? generatedAnalysis.HasBoundaryRoot;
-                boundaryRootHasErrorContent &= razorAnalysis?.BoundaryRootHasErrorContent ?? generatedAnalysis.BoundaryRootHasErrorContent;
+                hasBoundaryRoot |= combinedRootAnalysis.HasBoundaryRoot;
+                boundaryRootHasErrorContent &= combinedRootAnalysis.BoundaryRootHasErrorContent;
+                if (combinedRootAnalysis.HasBoundaryRoot || generatedAnalysis.RootBoundaryComponent is not null)
+                {
+                    rootBoundaryIsKeyed &= combinedRootAnalysis.RootBoundaryIsKeyed;
+                }
+                rootBoundaryUsesStaleRouteKey |= combinedRootAnalysis.RootBoundaryUsesStaleRouteKey;
+
                 rootBoundaryComponent ??= generatedAnalysis.RootBoundaryComponent;
-                firstUnprotectedRootLocation ??= razorAnalysis?.FirstUnprotectedRootLocation ?? generatedAnalysis.FirstUnprotectedRootLocation;
-                boundaryRootLocation ??= razorAnalysis?.BoundaryRootLocation ?? generatedAnalysis.BoundaryRootLocation;
+                firstUnprotectedRootLocation ??= combinedRootAnalysis.FirstUnprotectedRootLocation;
+                boundaryRootLocation ??= combinedRootAnalysis.BoundaryRootLocation;
 
                 foreach (var childComponent in generatedAnalysis.ChildComponents)
                 {
@@ -2445,6 +2810,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return new RenderTreeAnalysis(
                 hasBoundaryRoot,
                 boundaryRootHasErrorContent,
+                rootBoundaryIsKeyed,
+                rootBoundaryUsesStaleRouteKey,
                 rootBoundaryComponent,
                 childComponents.ToImmutable(),
                 firstUnprotectedRootLocation,
@@ -2544,6 +2911,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         public RenderTreeAnalysis(
             bool hasBoundaryRoot,
             bool boundaryRootHasErrorContent,
+            bool rootBoundaryIsKeyed,
+            bool rootBoundaryUsesStaleRouteKey,
             INamedTypeSymbol? rootBoundaryComponent,
             ImmutableHashSet<INamedTypeSymbol> childComponents,
             Location? firstUnprotectedRootLocation,
@@ -2551,6 +2920,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         {
             HasBoundaryRoot = hasBoundaryRoot;
             BoundaryRootHasErrorContent = boundaryRootHasErrorContent;
+            RootBoundaryIsKeyed = rootBoundaryIsKeyed;
+            RootBoundaryUsesStaleRouteKey = rootBoundaryUsesStaleRouteKey;
             RootBoundaryComponent = rootBoundaryComponent;
             ChildComponents = childComponents;
             FirstUnprotectedRootLocation = firstUnprotectedRootLocation;
@@ -2561,9 +2932,44 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         public bool BoundaryRootHasErrorContent { get; }
 
+        public bool RootBoundaryIsKeyed { get; }
+
+        public bool RootBoundaryUsesStaleRouteKey { get; }
+
         public INamedTypeSymbol? RootBoundaryComponent { get; }
 
         public ImmutableHashSet<INamedTypeSymbol> ChildComponents { get; }
+
+        public Location? FirstUnprotectedRootLocation { get; }
+
+        public Location? BoundaryRootLocation { get; }
+    }
+
+    private sealed class CombinedRootAnalysis
+    {
+        public CombinedRootAnalysis(
+            bool hasBoundaryRoot,
+            bool boundaryRootHasErrorContent,
+            bool rootBoundaryIsKeyed,
+            bool rootBoundaryUsesStaleRouteKey,
+            Location? firstUnprotectedRootLocation,
+            Location? boundaryRootLocation)
+        {
+            HasBoundaryRoot = hasBoundaryRoot;
+            BoundaryRootHasErrorContent = boundaryRootHasErrorContent;
+            RootBoundaryIsKeyed = rootBoundaryIsKeyed;
+            RootBoundaryUsesStaleRouteKey = rootBoundaryUsesStaleRouteKey;
+            FirstUnprotectedRootLocation = firstUnprotectedRootLocation;
+            BoundaryRootLocation = boundaryRootLocation;
+        }
+
+        public bool HasBoundaryRoot { get; }
+
+        public bool BoundaryRootHasErrorContent { get; }
+
+        public bool RootBoundaryIsKeyed { get; }
+
+        public bool RootBoundaryUsesStaleRouteKey { get; }
 
         public Location? FirstUnprotectedRootLocation { get; }
 
@@ -2581,5 +2987,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         public Location? MissingErrorBoundaryLocation { get; }
 
         public Location? BoundaryLocation { get; }
+    }
+
+    private enum LayoutBoundaryKeyAnalysis
+    {
+        Unknown,
+        NavigationReactive,
+        StaleNavigationSnapshot
     }
 }

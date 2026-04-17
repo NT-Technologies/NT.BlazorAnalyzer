@@ -450,6 +450,312 @@ public sealed class BlazorCoverageRegressionTests
     }
 
     [Fact]
+    public async Task LayoutBoundaryWithoutRouteKey_ReportsNtba0010()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateStaticComponent(
+                    componentName: "MainLayout",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                        __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                        {
+                            __builder2.AddContent(2, Body);
+                        }));
+                        __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                        {
+                            __builder3.OpenElement(4, "p");
+                            __builder3.CloseElement();
+                        }));
+                        __builder.CloseComponent();
+                        """,
+                    baseType: "global::Microsoft.AspNetCore.Components.LayoutComponentBase")
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "MainLayout",
+                    markup: """
+                        @inherits LayoutComponentBase
+                        <ErrorBoundary>
+                            @Body
+                            <ErrorContent>
+                                <p>Error</p>
+                            </ErrorContent>
+                        </ErrorBoundary>
+                        """)
+            ]);
+
+        var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0010");
+        Assert.Contains("route", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith("Components/MainLayout.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LayoutBoundaryWithRouteKey_DoesNotReportNtba0010()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateStaticComponent(
+                    componentName: "MainLayout",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                        __builder.SetKey(CurrentRoute);
+                        __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                        {
+                            __builder2.AddContent(2, Body);
+                        }));
+                        __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                        {
+                            __builder3.OpenElement(4, "p");
+                            __builder3.CloseElement();
+                        }));
+                        __builder.CloseComponent();
+                        """,
+                    razorMethods: """
+                        private string CurrentRoute => "/claims";
+                        """,
+                    baseType: "global::Microsoft.AspNetCore.Components.LayoutComponentBase")
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "MainLayout",
+                    markup: """
+                        @inherits LayoutComponentBase
+                        <ErrorBoundary @key="CurrentRoute">
+                            @Body
+                            <ErrorContent>
+                                <p>Error</p>
+                            </ErrorContent>
+                        </ErrorBoundary>
+                        """)
+            ]);
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0010");
+    }
+
+    [Fact]
+    public async Task LayoutBoundaryWithSnapshotRouteKey_ReportsNtba0011()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateStaticComponent(
+                    componentName: "MainLayout",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                        __builder.SetKey(_currentRoute);
+                        __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                        {
+                            __builder2.AddContent(2, Body);
+                        }));
+                        __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                        {
+                            __builder3.OpenElement(4, "p");
+                            __builder3.CloseElement();
+                        }));
+                        __builder.CloseComponent();
+                        """,
+                    razorMethods: """
+                        private string _currentRoute = default!;
+                        private global::Microsoft.AspNetCore.Components.NavigationManager _navManager = default!;
+
+                        protected override void OnInitialized()
+                        {
+                            _currentRoute = _navManager.Uri;
+                        }
+                        """,
+                    baseType: "global::Microsoft.AspNetCore.Components.LayoutComponentBase")
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "MainLayout",
+                    markup: """
+                        @inherits LayoutComponentBase
+                        @inject NavigationManager _navManager
+
+                        <ErrorBoundary @key="_currentRoute">
+                            @Body
+                            <ErrorContent>
+                                <p>Error</p>
+                            </ErrorContent>
+                        </ErrorBoundary>
+
+                        @code {
+                            private string _currentRoute = default!;
+
+                            protected override void OnInitialized()
+                            {
+                                _currentRoute = _navManager.Uri;
+                            }
+                        }
+                        """)
+            ]);
+
+        var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0011");
+        Assert.Contains("does not update on navigation", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith("Components/MainLayout.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LayoutBoundaryWithoutRouteKey_UsesRazorMarkupLocation_ForSourceGeneratorPath()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                new SourceFile(
+                    Path: @"obj\Debug\net9.0\Microsoft.CodeAnalysis.Razor.Compiler\Microsoft.NET.Sdk.Razor.SourceGenerators.RazorSourceGenerator\Layout\MainLayout_razor.g.cs",
+                    Text: """
+                        namespace TestComponents
+                        {
+                            public partial class MainLayout : global::Microsoft.AspNetCore.Components.LayoutComponentBase
+                            {
+                                protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                                {
+                                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                                    {
+                                        __builder2.AddContent(2, Body);
+                                    }));
+                                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                                    {
+                                        __builder3.OpenElement(4, "p");
+                                        __builder3.CloseElement();
+                                    }));
+                                    __builder.CloseComponent();
+                                }
+                            }
+                        }
+                        """)
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: @"Layout\MainLayout",
+                    markup: """
+                        @inherits LayoutComponentBase
+                        <ErrorBoundary>
+                            @Body
+                            <ErrorContent>
+                                <p>Error</p>
+                            </ErrorContent>
+                        </ErrorBoundary>
+                        """)
+            ]);
+
+        var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0010");
+        Assert.EndsWith(@"Layout\MainLayout.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task DerivedBoundaryRoot_WithProtectedConditionalContent_DoesNotReportNtba0001_ForOwnerOrInteractiveChild()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateCustomBoundary("IntersectErrorBoundary"),
+                TestComponentSources.CreateInteractiveComponent(
+                    componentName: "PaginationButtonsWithCount",
+                    renderTreeStatements: """
+                        __builder.OpenElement(0, "div");
+                        __builder.CloseElement();
+                        """),
+                new SourceFile(
+                    Path: "Components/DashboardItem.cs",
+                    Text: """
+                        namespace TestComponents;
+
+                        public abstract class DashboardItem : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected static global::Microsoft.AspNetCore.Components.RenderFragment RenderTitle(string title) => __builder =>
+                            {
+                                __builder.OpenElement(0, "h3");
+                                __builder.AddContent(1, title);
+                                __builder.CloseElement();
+                            };
+                        }
+                        """),
+                new SourceFile(
+                    Path: "Components/TnTDataGrid.razor.g.cs",
+                    Text: """
+                        namespace TestComponents
+                        {
+                            public partial class TnTDataGrid : global::Microsoft.AspNetCore.Components.ComponentBase
+                            {
+                                [global::Microsoft.AspNetCore.Components.Parameter]
+                                public global::System.Func<int, int>? SortBy { get; set; }
+
+                                protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                                {
+                                    __builder.OpenElement(0, "div");
+                                    __builder.CloseElement();
+                                }
+                            }
+                        }
+                        """),
+                TestComponentSources.CreateInteractiveComponent(
+                    componentName: "UpcomingAndPastDueFollowUp",
+                    baseType: "global::TestComponents.DashboardItem",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::TestComponents.IntersectErrorBoundary>(0);
+                        __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                        {
+                            if (!RendererInfo.IsInteractive)
+                            {
+                                __builder2.OpenElement(2, "div");
+                                __builder2.CloseElement();
+                            }
+                            else
+                            {
+                                __builder2.AddContent(3, RenderTitle("Upcoming and Past Due Follow-ups"));
+                                __builder2.OpenComponent<global::TestComponents.TnTDataGrid>(4);
+                                __builder2.AddAttribute(5, "SortBy", (global::System.Func<int, int>)(p => p));
+                                __builder2.CloseComponent();
+                                __builder2.OpenComponent<global::TestComponents.PaginationButtonsWithCount>(6);
+                                __builder2.CloseComponent();
+                            }
+                        }));
+                        __builder.CloseComponent();
+                        """,
+                    razorMethods: """
+                        private RenderInfo RendererInfo { get; } = new RenderInfo();
+
+                        private sealed class RenderInfo
+                        {
+                            public bool IsInteractive { get; } = true;
+                        }
+                        """)
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "UpcomingAndPastDueFollowUp",
+                    markup: """
+                        @rendermode InteractiveServer
+                        @inherits DashboardItem
+
+                        <TestComponents.IntersectErrorBoundary>
+                            @if (!RendererInfo.IsInteractive) {
+                                <div></div>
+                            }
+                            else {
+                                @RenderTitle("Upcoming and Past Due Follow-ups")
+                                <TnTDataGrid SortBy="@(p => p)" />
+                                <PaginationButtonsWithCount />
+                            }
+                        </TestComponents.IntersectErrorBoundary>
+                        """)
+            ]);
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("UpcomingAndPastDueFollowUp", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("PaginationButtonsWithCount", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task SharedRenderModeCoverage_WorksAcrossDifferentModePropertySyntax()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(

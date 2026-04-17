@@ -25,6 +25,7 @@ internal static class RazorMarkupAnalyzer
         var hasBoundaryProtectedContent = false;
         var hasUnprotectedInteractiveRoot = false;
         var rootBoundaryHasErrorContent = true;
+        var rootBoundaryIsKeyed = false;
         Location? firstUnprotectedRootLocation = null;
         Location? boundaryRootLocation = null;
 
@@ -90,6 +91,7 @@ internal static class RazorMarkupAnalyzer
                     {
                         hasBoundaryProtectedContent = true;
                         rootBoundaryHasErrorContent = false;
+                        rootBoundaryIsKeyed = HasKeyDirective(tag.Attributes);
                     }
                     else if (isComponent && HasCallbackLikeComponentAttribute(tag.Attributes))
                     {
@@ -139,6 +141,7 @@ internal static class RazorMarkupAnalyzer
         return new RazorMarkupAnalysis(
             hasBoundaryRoot: hasBoundaryProtectedContent && !hasUnprotectedInteractiveRoot,
             boundaryRootHasErrorContent: rootBoundaryHasErrorContent,
+            boundaryRootIsKeyed: rootBoundaryIsKeyed,
             firstUnprotectedRootLocation,
             boundaryRootLocation);
     }
@@ -361,6 +364,9 @@ internal static class RazorMarkupAnalyzer
         attributes.IndexOf("@bind-", StringComparison.OrdinalIgnoreCase) >= 0 ||
         attributes.IndexOf("=>", StringComparison.Ordinal) >= 0;
 
+    private static bool HasKeyDirective(string attributes) =>
+        attributes.IndexOf("@key", StringComparison.OrdinalIgnoreCase) >= 0;
+
     private static bool IsBoundaryTag(string tagName, ImmutableHashSet<string> boundaryComponentNames) =>
         string.Equals(tagName, "ErrorBoundary", StringComparison.Ordinal) ||
         boundaryComponentNames.Contains(tagName);
@@ -422,11 +428,13 @@ internal sealed class RazorMarkupAnalysis
     public RazorMarkupAnalysis(
         bool hasBoundaryRoot,
         bool boundaryRootHasErrorContent,
+        bool boundaryRootIsKeyed,
         Location? firstUnprotectedRootLocation,
         Location? boundaryRootLocation)
     {
         HasBoundaryRoot = hasBoundaryRoot;
         BoundaryRootHasErrorContent = boundaryRootHasErrorContent;
+        BoundaryRootIsKeyed = boundaryRootIsKeyed;
         FirstUnprotectedRootLocation = firstUnprotectedRootLocation;
         BoundaryRootLocation = boundaryRootLocation;
     }
@@ -434,6 +442,8 @@ internal sealed class RazorMarkupAnalysis
     public bool HasBoundaryRoot { get; }
 
     public bool BoundaryRootHasErrorContent { get; }
+
+    public bool BoundaryRootIsKeyed { get; }
 
     public Location? FirstUnprotectedRootLocation { get; }
 

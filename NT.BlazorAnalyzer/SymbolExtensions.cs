@@ -109,9 +109,9 @@ internal static class SymbolExtensions
         foreach (var syntaxReference in symbol.DeclaringSyntaxReferences)
         {
             var path = syntaxReference.SyntaxTree.FilePath;
-            if (path.EndsWith(".razor.g.cs", StringComparison.OrdinalIgnoreCase))
+            if (TryMapGeneratedRazorPath(path) is { } razorPath)
             {
-                return path.Substring(0, path.Length - 5);
+                return razorPath;
             }
         }
 
@@ -158,6 +158,34 @@ internal static class SymbolExtensions
         }
 
         return GetPreferredDeclaredSourceLocation(symbol) ?? location;
+    }
+
+    private static string? TryMapGeneratedRazorPath(string? path)
+    {
+        if (path is null)
+        {
+            return null;
+        }
+
+        if (path.EndsWith(".razor.g.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            return path.Substring(0, path.Length - 5);
+        }
+
+        if (path.EndsWith("_razor.g.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            var mappedPath = path.Substring(0, path.Length - "_razor.g.cs".Length) + ".razor";
+            const string sourceGeneratorSegment = "RazorSourceGenerator\\";
+            var sourceGeneratorIndex = mappedPath.LastIndexOf(sourceGeneratorSegment, StringComparison.OrdinalIgnoreCase);
+            if (sourceGeneratorIndex >= 0)
+            {
+                return mappedPath.Substring(sourceGeneratorIndex + sourceGeneratorSegment.Length);
+            }
+
+            return mappedPath;
+        }
+
+        return null;
     }
 
     private static Location? GetPreferredDeclaredSourceLocation(ISymbol symbol)

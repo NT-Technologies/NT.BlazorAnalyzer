@@ -77,6 +77,14 @@ Warning on `catch` blocks that neither:
 
 Warning when a component opens `ErrorBoundary` first but does not provide `ErrorContent`.
 
+### `NTBA0010`
+
+Warning when a layout component uses a long-lived root `ErrorBoundary` without keying it by route or otherwise resetting it on navigation.
+
+### `NTBA0011`
+
+Warning when a layout component keys its root `ErrorBoundary` with a route snapshot that is only populated once during initialization and therefore will not change on later navigation.
+
 ## Warning Examples
 
 ### Emits `NTBA0001` and `NTBA0002`
@@ -339,6 +347,68 @@ Why:
 <ErrorBoundary>
     <button @onclick="HandleClick">Click</button>
 </ErrorBoundary>
+```
+
+### Emits `NTBA0010` when a layout root boundary is not route-keyed
+
+```razor
+@inherits LayoutComponentBase
+
+<ErrorBoundary>
+    @Body
+    <ErrorContent>
+        <p>Something went wrong.</p>
+    </ErrorContent>
+</ErrorBoundary>
+```
+
+Prefer:
+
+```razor
+@inherits LayoutComponentBase
+@inject NavigationManager Nav
+
+<ErrorBoundary @key="Nav.ToBaseRelativePath(Nav.Uri)">
+    @Body
+    <ErrorContent>
+        <p>Something went wrong.</p>
+    </ErrorContent>
+</ErrorBoundary>
+```
+
+### Emits `NTBA0011` when a layout route key is only initialized once
+
+```razor
+@inject NavigationManager Nav
+@inherits LayoutComponentBase
+
+<ErrorBoundary @key="_currentRoute">
+    @Body
+</ErrorBoundary>
+
+@code {
+    private string _currentRoute = default!;
+
+    protected override void OnInitialized()
+    {
+        _currentRoute = Nav.Uri;
+    }
+}
+```
+
+Prefer:
+
+```razor
+@inject NavigationManager Nav
+@inherits LayoutComponentBase
+
+<ErrorBoundary @key="CurrentRoute">
+    @Body
+</ErrorBoundary>
+
+@code {
+    private string CurrentRoute => Nav.ToBaseRelativePath(Nav.Uri);
+}
 ```
 
 ## Build And Test
