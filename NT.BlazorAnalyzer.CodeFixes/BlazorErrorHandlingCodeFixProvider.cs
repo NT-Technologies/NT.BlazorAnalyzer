@@ -17,8 +17,6 @@ public sealed class BlazorErrorHandlingCodeFixProvider : CodeFixProvider
     private const string AddInteractivityGuardTitle = "Guard with RendererInfo.IsInteractive";
     private const string RethrowExceptionTitle = "Rethrow exception";
     private const string AddErrorContentTitle = "Add ErrorContent";
-    private const string AddRouteKeyTitle = "Key ErrorBoundary by route";
-    private const string UseComputedRouteKeyTitle = "Use computed route key";
 
     public override ImmutableArray<string> FixableDiagnosticIds =>
     [
@@ -28,9 +26,7 @@ public sealed class BlazorErrorHandlingCodeFixProvider : CodeFixProvider
         "NTBA0006",
         "NTBA0007",
         "NTBA0008",
-        "NTBA0009",
-        "NTBA0010",
-        "NTBA0011"
+        "NTBA0009"
     ];
 
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;
@@ -132,36 +128,6 @@ public sealed class BlazorErrorHandlingCodeFixProvider : CodeFixProvider
             return;
         }
 
-        if (diagnostic.Id is "NTBA0010" or "NTBA0011")
-        {
-            var sourceText = await context.Document.GetTextAsync(context.CancellationToken).ConfigureAwait(false);
-            if (!TryFindRouteKeyEdit(
-                sourceText,
-                context.Span.Start,
-                replaceExistingKey: diagnostic.Id == "NTBA0011",
-                out var existingKeySpan,
-                out var keyInsertionPosition))
-            {
-                return;
-            }
-
-            var navigationManagerIdentifier = TryGetNavigationManagerIdentifier(sourceText) ?? "NavManager";
-            var addNavigationManagerInject = TryGetNavigationManagerIdentifier(sourceText) is null;
-
-            context.RegisterCodeFix(
-                CodeAction.Create(
-                    diagnostic.Id == "NTBA0011" ? UseComputedRouteKeyTitle : AddRouteKeyTitle,
-                    cancellationToken => ApplyRouteKeyFixAsync(
-                        context.Document,
-                        sourceText,
-                        existingKeySpan,
-                        keyInsertionPosition,
-                        navigationManagerIdentifier,
-                        addNavigationManagerInject,
-                        cancellationToken),
-                    equivalenceKey: diagnostic.Id == "NTBA0011" ? UseComputedRouteKeyTitle : AddRouteKeyTitle),
-                diagnostic);
-        }
     }
 
     private static bool CanWrapMethod(MethodDeclarationSyntax methodDeclaration) =>
@@ -302,52 +268,6 @@ public sealed class BlazorErrorHandlingCodeFixProvider : CodeFixProvider
         return Task.FromResult(document.WithText(updatedText));
     }
 
-    private static Task<Document> ApplyRouteKeyFixAsync(
-        Document document,
-        SourceText sourceText,
-        TextSpan? existingKeySpan,
-        int keyInsertionPosition,
-        string navigationManagerIdentifier,
-        bool addNavigationManagerInject,
-        CancellationToken cancellationToken)
-    {
-        var newline = DetectNewLine(sourceText);
-        var routePropertyName = "CurrentRoute";
-        var changes = new List<TextChange>();
-
-        if (existingKeySpan is { } keySpan)
-        {
-            changes.Add(new TextChange(keySpan, $"@key=\"{routePropertyName}\""));
-        }
-        else
-        {
-            changes.Add(new TextChange(new TextSpan(keyInsertionPosition, 0), $" @key=\"{routePropertyName}\""));
-        }
-
-        if (addNavigationManagerInject)
-        {
-            var injectDirective = $"@inject Microsoft.AspNetCore.Components.NavigationManager {navigationManagerIdentifier}{newline}";
-            changes.Add(new TextChange(new TextSpan(0, 0), injectDirective));
-        }
-
-        if (!HasCurrentRouteProperty(sourceText))
-        {
-            var routePropertyBlock = string.Join(
-                newline,
-                new[]
-                {
-                    string.Empty,
-                    "@code {",
-                    $"    private string {routePropertyName} => {navigationManagerIdentifier}.ToBaseRelativePath({navigationManagerIdentifier}.Uri);",
-                    "}"
-                });
-            changes.Add(new TextChange(new TextSpan(sourceText.Length, 0), routePropertyBlock));
-        }
-
-        var updatedText = sourceText.WithChanges(changes.OrderByDescending(static change => change.Span.Start));
-        return Task.FromResult(document.WithText(updatedText));
-    }
-
     private static bool TryFindBoundaryInsertion(SourceText sourceText, int diagnosticPosition, out int insertionPosition, out string indentation)
     {
         var text = sourceText.ToString();
@@ -371,111 +291,6 @@ public sealed class BlazorErrorHandlingCodeFixProvider : CodeFixProvider
         insertionPosition = closingTagStart;
         return true;
     }
-
-    private static bool TryFindRouteKeyEdit(
-        SourceText sourceText,
-        int diagnosticPosition,
-        bool replaceExistingKey,
-        out TextSpan? existingKeySpan,
-        out int insertionPosition)
-    {
-        var text = sourceText.ToString();
-        existingKeySpan = null;
-        insertionPosition = -1;
-
-        if (!TryFindOpeningTag(text, diagnosticPosition, out var tagStart, out _, out var tagEnd, out var selfClosing) ||
-            selfClosing)
-        {
-            return false;
-        }
-
-        if (replaceExistingKey &&
-            TryFindAttributeSpan(text, tagStart, tagEnd, "@key", out var keySpan))
-        {
-            existingKeySpan = keySpan;
-            insertionPosition = keySpan.Start;
-            return true;
-        }
-
-        insertionPosition = tagEnd - 1;
-        return true;
-    }
-
-    private static bool TryFindAttributeSpan(string text, int tagStart, int tagEnd, string attributeName, out TextSpan span)
-    {
-        span = default;
-        var index = text.IndexOf(attributeName, tagStart, tagEnd - tagStart, StringComparison.OrdinalIgnoreCase);
-        if (index < 0)
-        {
-            return false;
-        }
-
-        var inQuote = false;
-        var quote = '\0';
-        var end = index + attributeName.Length;
-        while (end < tagEnd)
-        {
-            var current = text[end];
-            if (inQuote)
-            {
-                if (current == quote)
-                {
-                    inQuote = false;
-                }
-
-                end++;
-                continue;
-            }
-
-            if (current is '"' or '\'')
-            {
-                inQuote = true;
-                quote = current;
-                end++;
-                continue;
-            }
-
-            if (char.IsWhiteSpace(current) || current is '>' or '/')
-            {
-                break;
-            }
-
-            end++;
-        }
-
-        span = new TextSpan(index, end - index);
-        return true;
-    }
-
-    private static string? TryGetNavigationManagerIdentifier(SourceText sourceText)
-    {
-        var text = sourceText.ToString();
-        foreach (var line in text.Split(["\r\n", "\n"], StringSplitOptions.None))
-        {
-            var trimmedLine = line.Trim();
-            if (!trimmedLine.StartsWith("@inject ", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var parts = trimmedLine.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 3)
-            {
-                continue;
-            }
-
-            if (string.Equals(parts[1], "NavigationManager", StringComparison.Ordinal) ||
-                string.Equals(parts[1], "Microsoft.AspNetCore.Components.NavigationManager", StringComparison.Ordinal))
-            {
-                return parts[2];
-            }
-        }
-
-        return null;
-    }
-
-    private static bool HasCurrentRouteProperty(SourceText sourceText) =>
-        sourceText.ToString().IndexOf("CurrentRoute =>", StringComparison.Ordinal) >= 0;
 
     private static bool TryFindOpeningTag(string text, int position, out int tagStart, out string tagName, out int tagEnd, out bool selfClosing)
     {

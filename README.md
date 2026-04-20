@@ -79,11 +79,7 @@ Warning when a component opens `ErrorBoundary` first but does not provide `Error
 
 ### `NTBA0010`
 
-Warning when a layout component uses a long-lived root `ErrorBoundary` without keying it by route or otherwise resetting it on navigation.
-
-### `NTBA0011`
-
-Warning when a layout component keys its root `ErrorBoundary` with a route snapshot that is only populated once during initialization and therefore will not change on later navigation.
+Warning when a layout component uses a root `ErrorBoundary`. Prefer placing boundaries at page or widget scope instead of wrapping layouts.
 
 ## Warning Examples
 
@@ -349,7 +345,7 @@ Why:
 </ErrorBoundary>
 ```
 
-### Emits `NTBA0010` when a layout root boundary is not route-keyed
+### Emits `NTBA0010` when a layout uses `ErrorBoundary`
 
 ```razor
 @inherits LayoutComponentBase
@@ -365,50 +361,8 @@ Why:
 Prefer:
 
 ```razor
-@inherits LayoutComponentBase
-@inject NavigationManager Nav
-
-<ErrorBoundary @key="Nav.ToBaseRelativePath(Nav.Uri)">
-    @Body
-    <ErrorContent>
-        <p>Something went wrong.</p>
-    </ErrorContent>
-</ErrorBoundary>
-```
-
-### Emits `NTBA0011` when a layout route key is only initialized once
-
-```razor
-@inject NavigationManager Nav
-@inherits LayoutComponentBase
-
-<ErrorBoundary @key="_currentRoute">
-    @Body
-</ErrorBoundary>
-
-@code {
-    private string _currentRoute = default!;
-
-    protected override void OnInitialized()
-    {
-        _currentRoute = Nav.Uri;
-    }
-}
-```
-
-Prefer:
-
-```razor
-@inject NavigationManager Nav
-@inherits LayoutComponentBase
-
-<ErrorBoundary @key="CurrentRoute">
-    @Body
-</ErrorBoundary>
-
-@code {
-    private string CurrentRoute => Nav.ToBaseRelativePath(Nav.Uri);
-}
+@* Layout keeps shared chrome and long-lived hosts outside page-local boundaries *@
+@Body
 ```
 
 ## Build And Test

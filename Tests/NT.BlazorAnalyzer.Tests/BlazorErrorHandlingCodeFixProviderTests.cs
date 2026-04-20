@@ -13,7 +13,7 @@ public sealed class BlazorErrorHandlingCodeFixProviderTests
         var provider = new BlazorErrorHandlingCodeFixProvider();
 
         Assert.Equal(
-            ["NTBA0003", "NTBA0004", "NTBA0005", "NTBA0006", "NTBA0007", "NTBA0008", "NTBA0009", "NTBA0010", "NTBA0011"],
+            ["NTBA0003", "NTBA0004", "NTBA0005", "NTBA0006", "NTBA0007", "NTBA0008", "NTBA0009"],
             provider.FixableDiagnosticIds.OrderBy(static id => id, StringComparer.Ordinal).ToArray());
         Assert.Same(WellKnownFixAllProviders.BatchFixer, provider.GetFixAllProvider());
     }
@@ -463,7 +463,7 @@ public sealed class BlazorErrorHandlingCodeFixProviderTests
     }
 
     [Fact]
-    public async Task LayoutBoundaryDiagnostic_OffersRouteKeyFix()
+    public async Task LayoutBoundaryDiagnostic_DoesNotOfferFix()
     {
         const string source = """
             @inherits LayoutComponentBase
@@ -478,83 +478,13 @@ public sealed class BlazorErrorHandlingCodeFixProviderTests
         var spanStart = source.IndexOf("ErrorBoundary", StringComparison.Ordinal);
         var diagnostic = CreateDiagnostic("NTBA0010", "Components/MainLayout.razor", spanStart, "ErrorBoundary".Length);
 
-        var updatedSource = await CodeFixTestHarness.ApplyCodeActionAsync(
+        var actions = await CodeFixTestHarness.GetCodeActionsAsync(
             path: "Components/MainLayout.razor",
             text: source,
             diagnostic,
-            new BlazorErrorHandlingCodeFixProvider(),
-            title: "Key ErrorBoundary by route");
+            new BlazorErrorHandlingCodeFixProvider());
 
-        Assert.Contains("@inject Microsoft.AspNetCore.Components.NavigationManager NavManager", updatedSource, StringComparison.Ordinal);
-        Assert.Contains("<ErrorBoundary @key=\"CurrentRoute\">", updatedSource, StringComparison.Ordinal);
-        Assert.Contains("private string CurrentRoute => NavManager.ToBaseRelativePath(NavManager.Uri);", updatedSource, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task LayoutBoundaryDiagnostic_DoesNotDuplicateNavigationManagerInject()
-    {
-        const string source = """
-            @inject NavigationManager Nav
-            @inherits LayoutComponentBase
-            <ErrorBoundary>
-                @Body
-                <ErrorContent>
-                    <p>Error</p>
-                </ErrorContent>
-            </ErrorBoundary>
-            """;
-
-        var spanStart = source.IndexOf("ErrorBoundary", StringComparison.Ordinal);
-        var diagnostic = CreateDiagnostic("NTBA0010", "Components/MainLayout.razor", spanStart, "ErrorBoundary".Length);
-
-        var updatedSource = await CodeFixTestHarness.ApplyCodeActionAsync(
-            path: "Components/MainLayout.razor",
-            text: source,
-            diagnostic,
-            new BlazorErrorHandlingCodeFixProvider(),
-            title: "Key ErrorBoundary by route");
-
-        Assert.Equal(1, CountOccurrences(updatedSource, "@inject NavigationManager Nav"));
-        Assert.Contains("<ErrorBoundary @key=\"CurrentRoute\">", updatedSource, StringComparison.Ordinal);
-        Assert.Contains("private string CurrentRoute => Nav.ToBaseRelativePath(Nav.Uri);", updatedSource, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task StaleLayoutBoundaryKeyDiagnostic_ReplacesExistingKeyExpression()
-    {
-        const string source = """
-            @inject NavigationManager Nav
-            @inherits LayoutComponentBase
-            <ErrorBoundary @key="_currentRoute">
-                @Body
-                <ErrorContent>
-                    <p>Error</p>
-                </ErrorContent>
-            </ErrorBoundary>
-
-            @code {
-                private string _currentRoute = default!;
-
-                protected override void OnInitialized()
-                {
-                    _currentRoute = Nav.Uri;
-                }
-            }
-            """;
-
-        var spanStart = source.IndexOf("ErrorBoundary", StringComparison.Ordinal);
-        var diagnostic = CreateDiagnostic("NTBA0011", "Components/MainLayout.razor", spanStart, "ErrorBoundary".Length);
-
-        var updatedSource = await CodeFixTestHarness.ApplyCodeActionAsync(
-            path: "Components/MainLayout.razor",
-            text: source,
-            diagnostic,
-            new BlazorErrorHandlingCodeFixProvider(),
-            title: "Use computed route key");
-
-        Assert.DoesNotContain("@key=\"_currentRoute\"", updatedSource, StringComparison.Ordinal);
-        Assert.Contains("<ErrorBoundary @key=\"CurrentRoute\">", updatedSource, StringComparison.Ordinal);
-        Assert.Contains("private string CurrentRoute => Nav.ToBaseRelativePath(Nav.Uri);", updatedSource, StringComparison.Ordinal);
+        Assert.Empty(actions);
     }
 
     private static Diagnostic CreateDiagnostic(string id, string path, int start, int length)
@@ -571,19 +501,4 @@ public sealed class BlazorErrorHandlingCodeFixProviderTests
         return Diagnostic.Create(descriptor, Location.Create(path, span, text.Lines.GetLinePositionSpan(span)));
     }
 
-    private static int CountOccurrences(string value, string search)
-    {
-        var count = 0;
-        for (var index = 0; ;)
-        {
-            index = value.IndexOf(search, index, StringComparison.Ordinal);
-            if (index < 0)
-            {
-                return count;
-            }
-
-            count++;
-            index += search.Length;
-        }
-    }
 }

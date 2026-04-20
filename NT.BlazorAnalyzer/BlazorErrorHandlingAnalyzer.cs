@@ -24,8 +24,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         DiagnosticDescriptors.AsyncVoidMethod,
         DiagnosticDescriptors.CatchWithoutLogging,
         DiagnosticDescriptors.ErrorBoundaryMissingErrorContent,
-        DiagnosticDescriptors.LayoutBoundaryShouldBeRouteKeyed,
-        DiagnosticDescriptors.LayoutBoundaryUsesStaleRouteKey
+        DiagnosticDescriptors.LayoutBoundaryShouldBeRouteKeyed
     ];
 
     public override void Initialize(AnalysisContext context)
@@ -275,7 +274,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             var hasBoundaryRoot = combinedRootAnalysis.HasBoundaryRoot;
             var boundaryRootHasErrorContent = combinedRootAnalysis.BoundaryRootHasErrorContent;
             var rootBoundaryIsKeyed = combinedRootAnalysis.RootBoundaryIsKeyed;
-            var rootBoundaryUsesStaleRouteKey = combinedRootAnalysis.RootBoundaryUsesStaleRouteKey;
             var hasUnprotectedRoot = combinedRootAnalysis.FirstUnprotectedRootLocation is not null;
             var hasRelevantChildren = renderTreeAnalysis.ChildComponents.Count > 0;
             var missingBoundaryLocation = combinedRootAnalysis.FirstUnprotectedRootLocation ??
@@ -316,22 +314,10 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
             if (containingType.InheritsFromOrEquals(layoutComponentBaseSymbol) &&
                 hasBoundaryRoot &&
-                !rootBoundaryIsKeyed &&
                 boundaryLocation is not null)
             {
                 context.ReportDiagnostic(Diagnostic.Create(
                     DiagnosticDescriptors.LayoutBoundaryShouldBeRouteKeyed,
-                    containingType.PreferNonGeneratedSourceLocation(boundaryLocation) ?? boundaryLocation,
-                    containingType.Name));
-            }
-
-            if (containingType.InheritsFromOrEquals(layoutComponentBaseSymbol) &&
-                hasBoundaryRoot &&
-                rootBoundaryUsesStaleRouteKey &&
-                boundaryLocation is not null)
-            {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    DiagnosticDescriptors.LayoutBoundaryUsesStaleRouteKey,
                     containingType.PreferNonGeneratedSourceLocation(boundaryLocation) ?? boundaryLocation,
                     containingType.Name));
             }
@@ -550,7 +536,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             var boundaryLocation = component.PreferNonGeneratedSourceLocation(diagnosticLocations.BoundaryLocation);
 
             if (!boundaryProtected &&
-                ShouldReportMissingErrorBoundary(component, declaredRenderModes, effectiveRenderModes, boundaryProtectedRenderModes, componentOwners) &&
+                ShouldReportMissingErrorBoundary(component, layoutComponents, declaredRenderModes, effectiveRenderModes, boundaryProtectedRenderModes, componentOwners) &&
                 !locallyReportedMissingErrorBoundaryComponents.ContainsKey(component) &&
                 missingBoundaryLocation is not null)
             {
@@ -1056,12 +1042,13 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
     private static bool ShouldReportMissingErrorBoundary(
         INamedTypeSymbol component,
+        ConcurrentDictionary<INamedTypeSymbol, byte> layoutComponents,
         IReadOnlyDictionary<INamedTypeSymbol, string?> declaredRenderModes,
         IReadOnlyDictionary<INamedTypeSymbol, ImmutableHashSet<string>> effectiveRenderModes,
         IReadOnlyDictionary<INamedTypeSymbol, ImmutableHashSet<string>> protectedRenderModes,
         ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners)
     {
-        if (component.IsAbstract)
+        if (component.IsAbstract || layoutComponents.ContainsKey(component))
         {
             return false;
         }

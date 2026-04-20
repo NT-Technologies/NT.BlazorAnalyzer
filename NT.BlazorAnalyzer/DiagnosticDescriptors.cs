@@ -92,19 +92,10 @@ internal static class DiagnosticDescriptors
 
     public static readonly DiagnosticDescriptor LayoutBoundaryShouldBeRouteKeyed = new(
         id: "NTBA0010",
-        title: "Layout ErrorBoundary should be keyed or reset",
-        messageFormat: "Layout component '{0}' uses a long-lived ErrorBoundary. Key the boundary by route, reset it on navigation, or move it to page/widget scope.",
+        title: "Layouts should avoid ErrorBoundary",
+        messageFormat: "Layout component '{0}' uses ErrorBoundary. Prefer page/widget boundaries instead of wrapping layouts.",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "ErrorBoundary instances inside Blazor layouts can survive route changes. They should be keyed by route, reset on navigation, or moved to page/widget scope.");
-
-    public static readonly DiagnosticDescriptor LayoutBoundaryUsesStaleRouteKey = new(
-        id: "NTBA0011",
-        title: "Layout ErrorBoundary route key should update on navigation",
-        messageFormat: "Layout component '{0}' keys ErrorBoundary with a route snapshot that does not update on navigation. Use a computed route key or reset the boundary when the location changes.",
-        category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
-        isEnabledByDefault: true,
-        description: "A layout ErrorBoundary key must change when navigation changes. Snapshotting the route once during initialization leaves the boundary faulted across later route changes.");
+        description: "Layout-level ErrorBoundary usage can reset shared layout state and recreate long-lived UI hosts across navigation. Prefer placing boundaries at page or widget scope.");
 }

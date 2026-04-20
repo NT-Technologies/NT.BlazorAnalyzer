@@ -450,7 +450,7 @@ public sealed class BlazorCoverageRegressionTests
     }
 
     [Fact]
-    public async Task LayoutBoundaryWithoutRouteKey_ReportsNtba0010()
+    public async Task LayoutBoundary_ReportsNtba0010()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             sources:
@@ -488,12 +488,12 @@ public sealed class BlazorCoverageRegressionTests
             ]);
 
         var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0010");
-        Assert.Contains("route", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Prefer page/widget boundaries", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
         Assert.EndsWith("Components/MainLayout.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task LayoutBoundaryWithRouteKey_DoesNotReportNtba0010()
+    public async Task LayoutBoundaryWithRouteKey_StillReportsNtba0010()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             sources:
@@ -534,11 +534,11 @@ public sealed class BlazorCoverageRegressionTests
                         """)
             ]);
 
-        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0010");
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0010");
     }
 
     [Fact]
-    public async Task LayoutBoundaryWithSnapshotRouteKey_ReportsNtba0011()
+    public async Task LayoutBoundaryWithSnapshotRouteKey_ReportsNtba0010()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             sources:
@@ -596,9 +596,30 @@ public sealed class BlazorCoverageRegressionTests
                         """)
             ]);
 
-        var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0011");
-        Assert.Contains("does not update on navigation", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
+        var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0010");
+        Assert.Contains("Prefer page/widget boundaries", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
         Assert.EndsWith("Components/MainLayout.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task InteractiveLayoutWithoutBoundary_DoesNotReportNtba0001()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "MainLayout",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "button");
+                    __builder.AddAttribute(1, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create<global::Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, HandleClick));
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private void HandleClick()
+                    {
+                    }
+                    """,
+                baseType: "global::Microsoft.AspNetCore.Components.LayoutComponentBase"));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
     }
 
     [Fact]
