@@ -8,12 +8,12 @@ internal static class DiagnosticDescriptors
 
     public static readonly DiagnosticDescriptor MissingErrorBoundary = new(
         id: "NTBA0001",
-        title: "Component should be protected by ErrorBoundary",
-        messageFormat: "Component '{0}' should be protected by ErrorBoundary. Wrapping '{1}' in an ErrorBoundary resolves this warning. Component to wrap: '{2}'.",
+        title: "Interactive render region should be protected by ErrorBoundary",
+        messageFormat: "Interactive render region in component '{0}' should be protected by ErrorBoundary. Wrapping '{1}' in an ErrorBoundary resolves this warning. Suggested scope: '{2}'.",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Blazor components in an interactive hierarchy should be protected by ErrorBoundary or a derived component at the root of their rendered content.",
+        description: "Each independently interactive, user-visible render region in a Blazor component hierarchy should be covered by ErrorBoundary or a derived component at an appropriate containment level.",
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
     public static readonly DiagnosticDescriptor MissingTryCatch = new(
@@ -23,7 +23,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Methods in interactive Blazor components without ErrorBoundary protection should be reached only through try/catch handling or delegate entirely to a safe member method.",
+        description: "Methods that can be reached from an independently interactive render region without ErrorBoundary coverage should be reached only through try/catch handling or delegate entirely to a safe member method.",
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
     public static readonly DiagnosticDescriptor LifecycleMissingTryCatch = new(

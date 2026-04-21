@@ -197,8 +197,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal));
-        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("PageHeader", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
     }
 
     [Fact]
@@ -270,7 +269,110 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'Page'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task InteractiveComponent_WithChildComponentRenderFragmentOnlyBeforeBoundary_DoesNotReportNtba0001()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.TemplateChild>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(2, "span");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(3);
+                    __builder.AddAttribute(4, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(5, "div");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.AddAttribute(6, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(7, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "TemplateChild",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
+    }
+
+    [Fact]
+    public async Task InteractiveComponent_WithChildComponentBindingCallbackBeforeBoundary_ReportsNtba0001()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.BindChild>(0);
+                    __builder.AddAttribute(1, "Value", currentValue);
+                    __builder.AddAttribute(2, "ValueChanged", global::Microsoft.AspNetCore.Components.EventCallback.Factory.CreateBinder<string>(this, __value => currentValue = __value, currentValue));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private string currentValue = string.Empty;
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "BindChild",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'Page'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task InteractiveComponent_WithDelegateAndAnonymousComponentCallbacksBeforeBoundary_ReportsMultipleNtba0001Diagnostics()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.DelegateChild>(0);
+                    __builder.AddAttribute(1, "Changed", (global::System.Action)(() => HandleLambda()));
+                    __builder.CloseComponent();
+                    __builder.OpenComponent<global::TestComponents.AnonymousChild>(2);
+                    __builder.AddAttribute(3, "Changed", (global::System.Action)delegate { HandleAnonymous(); });
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private void HandleLambda()
+                    {
+                        currentCount++;
+                    }
+
+                    private void HandleAnonymous()
+                    {
+                        currentCount++;
+                    }
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "DelegateChild",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """),
+            TestComponentSources.CreateStaticComponent(
+                componentName: "AnonymousChild",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """));
+
+        Assert.Equal(2, diagnostics.Count(diagnostic => diagnostic.Id == "NTBA0001"));
     }
 
     [Fact]
@@ -321,7 +423,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Edit'", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'Edit'", StringComparison.Ordinal));
     }
 
 
@@ -600,19 +702,15 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     }
                     """));
 
-        Assert.Collection(
-            diagnostics,
-            diagnostic => Assert.Equal("NTBA0001", diagnostic.Id),
-            diagnostic =>
-            {
-                Assert.Equal("NTBA0002", diagnostic.Id);
-                Assert.Contains("HandleUnsafe", diagnostic.GetMessage(), StringComparison.Ordinal);
-            },
-            diagnostic =>
-            {
-                Assert.Equal("NTBA0002", diagnostic.Id);
-                Assert.Contains("IncrementCore", diagnostic.GetMessage(), StringComparison.Ordinal);
-            });
+        var missingBoundaryDiagnostics = diagnostics.Where(diagnostic => diagnostic.Id == "NTBA0001").ToArray();
+
+        Assert.Equal(4, diagnostics.Count);
+        Assert.Equal(2, missingBoundaryDiagnostics.Length);
+        Assert.NotEqual(
+            missingBoundaryDiagnostics[0].Location.GetLineSpan().StartLinePosition.Line,
+            missingBoundaryDiagnostics[1].Location.GetLineSpan().StartLinePosition.Line);
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("HandleUnsafe", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("IncrementCore", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -908,10 +1006,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Equal(2, unwrappedDiagnostics.Count);
-        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal));
-        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Child'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Page'", StringComparison.Ordinal));
-        Assert.DoesNotContain(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal));
+        Assert.Empty(unwrappedDiagnostics);
 
         var wrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -969,10 +1064,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Equal(2, unwrappedDiagnostics.Count);
-        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Page'", StringComparison.Ordinal));
-        Assert.Contains(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Child'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Child'", StringComparison.Ordinal));
-        Assert.DoesNotContain(unwrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal));
+        Assert.Empty(unwrappedDiagnostics);
 
         var pageWrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateStaticComponent(
@@ -1004,10 +1096,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Single(pageWrappedDiagnostics);
-        Assert.DoesNotContain(pageWrappedDiagnostics, diagnostic => diagnostic.GetMessage().Contains("Component 'Page'", StringComparison.Ordinal));
-        Assert.Contains(pageWrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Child'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'Child'", StringComparison.Ordinal));
-        Assert.DoesNotContain(pageWrappedDiagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'Grandchild'", StringComparison.Ordinal));
+        Assert.Empty(pageWrappedDiagnostics);
 
         var childWrappedDiagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateStaticComponent(
@@ -1039,14 +1128,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """));
 
-        Assert.Collection(
-            childWrappedDiagnostics,
-            diagnostic =>
-            {
-                Assert.Equal("NTBA0001", diagnostic.Id);
-                Assert.Contains("Component 'Page'", diagnostic.GetMessage(), StringComparison.Ordinal);
-                Assert.Contains("'Page'", diagnostic.GetMessage(), StringComparison.Ordinal);
-            });
+        Assert.Empty(childWrappedDiagnostics);
     }
 
     [Fact]

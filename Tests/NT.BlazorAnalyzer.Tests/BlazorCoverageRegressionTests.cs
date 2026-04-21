@@ -286,6 +286,47 @@ public sealed class BlazorCoverageRegressionTests
     }
 
     [Fact]
+    public async Task MissingErrorBoundary_ForComponentMethodGroupCallback_UsesRazorComponentLocation()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateInteractiveComponent(
+                    componentName: "EditPage",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::TestComponents.EditorForm>(0);
+                        __builder.AddAttribute(1, "OnSave", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, HandleSave));
+                        __builder.CloseComponent();
+                        """,
+                    razorMethods: """
+                        private void HandleSave()
+                        {
+                            currentCount++;
+                        }
+                        """),
+                TestComponentSources.CreateStaticComponent(
+                    componentName: "EditorForm",
+                    renderTreeStatements: """
+                        __builder.OpenElement(0, "form");
+                        __builder.CloseElement();
+                        """)
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "EditPage",
+                    markup: """
+                        @rendermode InteractiveServer
+                        <EditorForm OnSave="HandleSave" />
+                        """)
+            ]);
+
+        var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0001");
+        Assert.EndsWith("Components/EditPage.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, diagnostic.Location.GetLineSpan().StartLinePosition.Line);
+    }
+
+    [Fact]
     public async Task MissingErrorBoundary_UsesSyntheticRazorLocation_WhenOnlyGeneratedRazorExists()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(

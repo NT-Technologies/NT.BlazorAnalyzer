@@ -17,14 +17,30 @@ Current focus:
 
 ### `NTBA0001`
 
-Warning when an explicitly interactive component has an unprotected interactive render root. The analyzer evaluates each top-level render root independently, ignores `PageTitle` and `HeadContent`, allows inert HTML roots, and requires event-callback HTML roots or component roots to be protected by `ErrorBoundary` or a derived component.
+Warning when an explicitly interactive component has an unprotected independently interactive render region. The analyzer evaluates each top-level render region independently, ignores `PageTitle` and `HeadContent`, allows inert HTML roots, and requires event-callback HTML roots or interactive component roots to be protected by `ErrorBoundary` or a derived component at an appropriate containment level.
+
+NTBA0001 is region-based, not component-root-based:
+- one diagnostic is emitted per uncovered interactive region
+- diagnostics are reported at the region root or interactive attribute when source mapping is available
+- generated `BuildRenderTree` semantic analysis is the source of truth for component interactivity
+- Razor parsing is used for HTML `@on...` / `@bind-...`, boundary detection, and `.razor` location mapping
+
+Interactive regions that count:
+- HTML event-handler roots such as `@onclick`
+- component callback roots backed by `EventCallback`, delegates, method groups, lambdas, or anonymous methods
+- component binding roots such as `@bind-Value` / generated `ValueChanged` callback patterns
+
+Content that does not count by itself:
+- inert HTML with no interactive attributes
+- plain `RenderFragment` / `RenderFragment<T>` content parameters without callback or binding semantics
+- ignored roots such as `PageTitle` and `HeadContent`
 
 Diagnostic text:
-`Interactive component '{ComponentName}' should protect interactive render roots with ErrorBoundary or a derived component`
+`Interactive render region in component '{ComponentName}' should be protected by ErrorBoundary. Wrapping '{RootName}' in an ErrorBoundary resolves this warning. Suggested scope: '{SuggestedScope}'.`
 
 ### `NTBA0002`
 
-Warning when a method in an interactive component without a valid root `ErrorBoundary` can be reached without `try/catch` handling.
+Warning when a method reachable from an independently interactive render region without `ErrorBoundary` coverage can be reached without `try/catch` handling.
 
 This rule is entrypoint-oriented, not helper-oriented:
 - root/API methods should be protected
@@ -101,8 +117,79 @@ Warning when a layout component uses a root `ErrorBoundary`. Prefer placing boun
 ```
 
 Why:
-- the root `button` has an interactive callback and is not protected by `ErrorBoundary`
+- the button creates an independently interactive region and is not protected by `ErrorBoundary`
 - `IncrementCount` is a UI entry method and has no `try/catch`
+
+### Emits `NTBA0001` for a component callback root
+
+```razor
+@rendermode InteractiveServer
+
+<EditorForm OnSave="HandleSave" />
+
+@code {
+    private void HandleSave()
+    {
+        Save();
+    }
+
+    private void Save()
+    {
+    }
+}
+```
+
+Why:
+- `OnSave="HandleSave"` is a semantic component callback root
+- the component root is independently interactive and is not protected by `ErrorBoundary`
+
+### Does not emit `NTBA0001` for plain templated content alone
+
+```razor
+@rendermode InteractiveServer
+
+<ShellLayout>
+    <ChildContent>
+        <h1>Static title</h1>
+    </ChildContent>
+</ShellLayout>
+```
+
+Why:
+- plain `RenderFragment` / templated content is not treated as interactive by itself
+- without callback or binding semantics, the component root is inert for NTBA0001
+
+### Emits one `NTBA0001` per uncovered interactive region
+
+```razor
+@rendermode InteractiveServer
+
+<button @onclick="IncrementCount">Increment</button>
+<EditorForm OnSave="HandleSave" />
+
+@code {
+    private void IncrementCount()
+    {
+        CurrentCount++;
+    }
+
+    private void HandleSave()
+    {
+        Save();
+    }
+
+    private void Save()
+    {
+    }
+
+    private int CurrentCount { get; set; }
+}
+```
+
+Why:
+- the button is one uncovered interactive region
+- `EditorForm OnSave="HandleSave"` is a second uncovered interactive region
+- NTBA0001 reports each region separately at its own source location when available
 
 ### Emits `NTBA0001` and `NTBA0002` even if the component type derives from `ErrorBoundary`
 
@@ -116,7 +203,7 @@ public partial class MyComponent : ErrorBoundary
 }
 ```
 
-If the generated `BuildRenderTree` contains an unprotected interactive root, the component still warns. The rule is based on rendered roots, not the component base type.
+If the generated `BuildRenderTree` contains an unprotected independently interactive region, the component still warns. The rule is based on rendered regions, not the component base type.
 
 ### Emits `NTBA0002` on an uncaught root and helper
 
@@ -239,8 +326,8 @@ Why:
 ```
 
 Why:
-- the interactive button is inside `ErrorBoundary`
-- `NTBA0002` is suppressed because the interactive component is already boundary-protected
+- the interactive region is inside `ErrorBoundary`
+- `NTBA0002` is suppressed because the interactive region is already boundary-protected
 
 ### Emits `NTBA0003` for an uncaught lifecycle method
 

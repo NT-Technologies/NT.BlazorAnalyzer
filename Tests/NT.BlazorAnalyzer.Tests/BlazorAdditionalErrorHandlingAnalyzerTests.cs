@@ -505,15 +505,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     __builder.CloseComponent();
                     """));
 
-        Assert.Contains(
-            diagnostics,
-            diagnostic => diagnostic.Id == "NTBA0001" &&
-                diagnostic.GetMessage().Contains("Component 'UnwrappedPage'", StringComparison.Ordinal) &&
-                diagnostic.GetMessage().Contains("'UnwrappedPage'", StringComparison.Ordinal));
-        Assert.DoesNotContain(
-            diagnostics,
-            diagnostic => diagnostic.Id == "NTBA0001" &&
-                diagnostic.GetMessage().Contains("DerivedSelect", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
     }
 
     [Fact]
@@ -563,8 +555,8 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     }
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'EditAssignmentForm'", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'NewAssignmentForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'EditAssignmentForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'NewAssignmentForm'", StringComparison.Ordinal));
         Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("AssignmentForm'", StringComparison.Ordinal) && !diagnostic.GetMessage().Contains("EditAssignmentForm", StringComparison.Ordinal) && !diagnostic.GetMessage().Contains("NewAssignmentForm", StringComparison.Ordinal));
     }
 
@@ -633,10 +625,10 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     }
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'EditDiaryNoteForm'", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'NewDiaryNoteForm'", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'DiaryNoteForm'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'EditDiaryNoteForm'", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Component 'DiaryNoteForm'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'NewDiaryNoteForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'EditDiaryNoteForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'NewDiaryNoteForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'DiaryNoteForm'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'EditDiaryNoteForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'DiaryNoteForm'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'NewDiaryNoteForm'", StringComparison.Ordinal));
     }
 
     [Fact]

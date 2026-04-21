@@ -2,8 +2,8 @@
 
 Rule ID | Category | Severity | Notes
 --------|----------|----------|------
-NTBA0001 | Reliability | Warning | Interactive component should be rooted in ErrorBoundary or derive from ErrorBoundary.
-NTBA0002 | Reliability | Warning | Methods in interactive components without ErrorBoundary protection should contain try/catch.
+NTBA0001 | Reliability | Warning | Independently interactive render regions should be covered by ErrorBoundary at an appropriate containment level.
+NTBA0002 | Reliability | Warning | Methods reachable from interactive regions without ErrorBoundary coverage should contain try/catch.
 NTBA0003 | Reliability | Warning | Interactive lifecycle methods should protect operational code with try/catch.
 NTBA0004 | Reliability | Warning | Interactive dispose methods should protect operational code with try/catch.
 NTBA0005 | Reliability | Warning | Interactive JS interop should use try/catch handling.

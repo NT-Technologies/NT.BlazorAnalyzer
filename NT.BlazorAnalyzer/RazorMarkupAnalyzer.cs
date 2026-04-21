@@ -23,11 +23,11 @@ internal static class RazorMarkupAnalyzer
         var text = sourceText.ToString();
         var stack = new Stack<TagFrame>();
         var hasBoundaryProtectedContent = false;
-        var hasUnprotectedInteractiveRoot = false;
         var rootBoundaryHasErrorContent = true;
         var rootBoundaryIsKeyed = false;
-        Location? firstUnprotectedRootLocation = null;
         Location? boundaryRootLocation = null;
+        var htmlInteractiveRegions = ImmutableArray.CreateBuilder<RazorMarkupRegion>();
+        var componentRoots = ImmutableArray.CreateBuilder<RazorComponentRoot>();
 
         for (var index = 0; index < text.Length;)
         {
@@ -81,55 +81,42 @@ internal static class RazorMarkupAnalyzer
             var isComponent = IsComponentTag(tag.Name);
             var activeBoundaryCount = stack.Count(frame => frame.IsBoundary);
 
-            if (stack.Count == 0)
+            if (stack.Count == 0 && isBoundary)
             {
-                if (!isIgnoredRoot)
-                {
-                    boundaryRootLocation ??= isBoundary ? CreateLocation(sourceText, razorPath, tag.NameSpan) : null;
+                boundaryRootLocation ??= CreateLocation(sourceText, razorPath, tag.NameSpan);
+                hasBoundaryProtectedContent = true;
+                rootBoundaryHasErrorContent = false;
+                rootBoundaryIsKeyed = HasKeyDirective(tag.Attributes);
+            }
 
-                    if (isBoundary)
-                    {
-                        hasBoundaryProtectedContent = true;
-                        rootBoundaryHasErrorContent = false;
-                        rootBoundaryIsKeyed = HasKeyDirective(tag.Attributes);
-                    }
-                    else if (isComponent && HasCallbackLikeComponentAttribute(tag.Attributes))
-                    {
-                        hasUnprotectedInteractiveRoot = true;
-                        firstUnprotectedRootLocation ??= CreateLocation(sourceText, razorPath, tag.NameSpan);
-                    }
-                    else if (HasEventHandlerAttribute(tag.Attributes))
-                    {
-                        hasUnprotectedInteractiveRoot = true;
-                        firstUnprotectedRootLocation ??= CreateLocation(sourceText, razorPath, tag.NameSpan);
-                    }
+            if (stack.Count == 1 &&
+                stack.Peek().IsBoundary &&
+                string.Equals(GetSimpleTagName(tag.Name), "ErrorContent", StringComparison.Ordinal))
+            {
+                rootBoundaryHasErrorContent = true;
+            }
+
+            if (activeBoundaryCount == 0 && !isIgnoredRoot && !isBoundary)
+            {
+                if (isComponent)
+                {
+                    componentRoots.Add(new RazorComponentRoot(
+                        tag.Name,
+                        CreateLocation(sourceText, razorPath, tag.NameSpan),
+                        TryCreateAttributeLocation(sourceText, razorPath, GetBindAttribute(tag.Attributes))));
+                }
+                else if (TryGetHtmlInteractiveLocation(tag.Attributes, sourceText, razorPath, out var htmlInteractiveLocation))
+                {
+                    htmlInteractiveRegions.Add(new RazorMarkupRegion(
+                        InteractiveRenderRegionKind.HtmlEventHandler,
+                        tag.Name,
+                        htmlInteractiveLocation));
                 }
             }
-            else
+
+            if (activeBoundaryCount > 0 && isBoundary)
             {
-                if (stack.Count == 1 && stack.Peek().IsBoundary && string.Equals(tag.Name, "ErrorContent", StringComparison.Ordinal))
-                {
-                    rootBoundaryHasErrorContent = true;
-                }
-
-                if (activeBoundaryCount == 0 && !isIgnoredRoot)
-                {
-                    if (isComponent && HasCallbackLikeComponentAttribute(tag.Attributes))
-                    {
-                        hasUnprotectedInteractiveRoot = true;
-                        firstUnprotectedRootLocation ??= CreateLocation(sourceText, razorPath, tag.NameSpan);
-                    }
-                    else if (HasEventHandlerAttribute(tag.Attributes))
-                    {
-                        hasUnprotectedInteractiveRoot = true;
-                        firstUnprotectedRootLocation ??= CreateLocation(sourceText, razorPath, tag.NameSpan);
-                    }
-                }
-
-                if (isBoundary)
-                {
-                    hasBoundaryProtectedContent = true;
-                }
+                hasBoundaryProtectedContent = true;
             }
 
             if (!tag.IsSelfClosing)
@@ -139,11 +126,12 @@ internal static class RazorMarkupAnalyzer
         }
 
         return new RazorMarkupAnalysis(
-            hasBoundaryRoot: hasBoundaryProtectedContent && !hasUnprotectedInteractiveRoot,
+            hasBoundaryRoot: hasBoundaryProtectedContent && htmlInteractiveRegions.Count == 0,
             boundaryRootHasErrorContent: rootBoundaryHasErrorContent,
             boundaryRootIsKeyed: rootBoundaryIsKeyed,
-            firstUnprotectedRootLocation,
-            boundaryRootLocation);
+            boundaryRootLocation,
+            htmlInteractiveRegions: htmlInteractiveRegions.ToImmutable(),
+            componentRoots: componentRoots.ToImmutable());
     }
 
     private static bool StartsWith(string text, int index, string value) =>
@@ -334,11 +322,110 @@ internal static class RazorMarkupAnalyzer
         tag = new ParsedTag(
             name,
             new TextSpan(nameStart, name.Length),
-            text.Substring(attributesStart, attributesEnd - attributesStart),
+            ParseAttributes(text, attributesStart, attributesEnd),
             isClosingTag,
             selfClosing,
             index);
         return true;
+    }
+
+    private static ImmutableArray<ParsedAttribute> ParseAttributes(string text, int startIndex, int endIndex)
+    {
+        if (endIndex <= startIndex)
+        {
+            return [];
+        }
+
+        var attributes = ImmutableArray.CreateBuilder<ParsedAttribute>();
+        for (var index = startIndex; index < endIndex;)
+        {
+            while (index < endIndex && char.IsWhiteSpace(text[index]))
+            {
+                index++;
+            }
+
+            if (index >= endIndex || text[index] is '/' or '>')
+            {
+                break;
+            }
+
+            var attributeStart = index;
+            while (index < endIndex &&
+                   !char.IsWhiteSpace(text[index]) &&
+                   text[index] is not '=' and not '/' and not '>')
+            {
+                index++;
+            }
+
+            if (index == attributeStart)
+            {
+                index++;
+                continue;
+            }
+
+            var name = text.Substring(attributeStart, index - attributeStart);
+            attributes.Add(new ParsedAttribute(name, new TextSpan(attributeStart, index - attributeStart)));
+
+            while (index < endIndex && char.IsWhiteSpace(text[index]))
+            {
+                index++;
+            }
+
+            if (index >= endIndex || text[index] != '=')
+            {
+                continue;
+            }
+
+            index++;
+            while (index < endIndex && char.IsWhiteSpace(text[index]))
+            {
+                index++;
+            }
+
+            if (index >= endIndex)
+            {
+                break;
+            }
+
+            if (text[index] is '"' or '\'')
+            {
+                var quote = text[index++];
+                while (index < endIndex)
+                {
+                    if (text[index] == quote)
+                    {
+                        index++;
+                        break;
+                    }
+
+                    index++;
+                }
+
+                continue;
+            }
+
+            var depth = 0;
+            while (index < endIndex)
+            {
+                var current = text[index];
+                if (current == '(')
+                {
+                    depth++;
+                }
+                else if (current == ')' && depth > 0)
+                {
+                    depth--;
+                }
+                else if (depth == 0 && (char.IsWhiteSpace(current) || current is '/' or '>'))
+                {
+                    break;
+                }
+
+                index++;
+            }
+        }
+
+        return attributes.ToImmutable();
     }
 
     private static bool IsTagNameCharacter(char value) =>
@@ -357,33 +444,89 @@ internal static class RazorMarkupAnalyzer
         }
     }
 
-    private static bool HasEventHandlerAttribute(string attributes) =>
-        attributes.IndexOf("@on", StringComparison.OrdinalIgnoreCase) >= 0;
+    private static bool TryGetHtmlInteractiveLocation(
+        ImmutableArray<ParsedAttribute> attributes,
+        SourceText sourceText,
+        string razorPath,
+        out Location diagnosticLocation)
+    {
+        if (GetEventAttribute(attributes) is { } eventAttribute)
+        {
+            diagnosticLocation = CreateLocation(sourceText, razorPath, eventAttribute.NameSpan);
+            return true;
+        }
 
-    private static bool HasCallbackLikeComponentAttribute(string attributes) =>
-        attributes.IndexOf("@bind-", StringComparison.OrdinalIgnoreCase) >= 0 ||
-        attributes.IndexOf("=>", StringComparison.Ordinal) >= 0;
+        if (GetBindAttribute(attributes) is { } bindAttribute)
+        {
+            diagnosticLocation = CreateLocation(sourceText, razorPath, bindAttribute.NameSpan);
+            return true;
+        }
 
-    private static bool HasKeyDirective(string attributes) =>
-        attributes.IndexOf("@key", StringComparison.OrdinalIgnoreCase) >= 0;
+        diagnosticLocation = null!;
+        return false;
+    }
 
-    private static bool IsBoundaryTag(string tagName, ImmutableHashSet<string> boundaryComponentNames) =>
-        string.Equals(tagName, "ErrorBoundary", StringComparison.Ordinal) ||
-        boundaryComponentNames.Contains(tagName);
+    private static ParsedAttribute? GetEventAttribute(ImmutableArray<ParsedAttribute> attributes)
+    {
+        foreach (var attribute in attributes)
+        {
+            if (attribute.Name.StartsWith("@on", StringComparison.OrdinalIgnoreCase))
+            {
+                return attribute;
+            }
+        }
+
+        return null;
+    }
+
+    private static ParsedAttribute? GetBindAttribute(ImmutableArray<ParsedAttribute> attributes)
+    {
+        foreach (var attribute in attributes)
+        {
+            if (attribute.Name.StartsWith("@bind-", StringComparison.OrdinalIgnoreCase))
+            {
+                return attribute;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool HasKeyDirective(ImmutableArray<ParsedAttribute> attributes) =>
+        attributes.Any(static attribute => attribute.Name.Equals("@key", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsBoundaryTag(string tagName, ImmutableHashSet<string> boundaryComponentNames)
+    {
+        var simpleTagName = GetSimpleTagName(tagName);
+        return string.Equals(simpleTagName, "ErrorBoundary", StringComparison.Ordinal) ||
+            boundaryComponentNames.Contains(simpleTagName);
+    }
 
     private static bool IsComponentTag(string tagName) =>
         !string.IsNullOrEmpty(tagName) &&
-        (char.IsUpper(tagName[0]) || tagName.IndexOf('.') >= 0);
+        (char.IsUpper(GetSimpleTagName(tagName)[0]) || tagName.IndexOf('.') >= 0);
 
-    private static bool IsIgnoredRootComponent(string tagName) =>
-        tagName is "PageTitle" or "HeadContent";
+    private static bool IsIgnoredRootComponent(string tagName)
+    {
+        var simpleTagName = GetSimpleTagName(tagName);
+        return simpleTagName is "PageTitle" or "HeadContent";
+    }
+
+    private static string GetSimpleTagName(string tagName)
+    {
+        var lastSeparator = tagName.LastIndexOf('.');
+        return lastSeparator >= 0 ? tagName.Substring(lastSeparator + 1) : tagName;
+    }
 
     private static Location CreateLocation(SourceText sourceText, string path, TextSpan span) =>
         Location.Create(path, span, sourceText.Lines.GetLinePositionSpan(span));
 
+    private static Location? TryCreateAttributeLocation(SourceText sourceText, string razorPath, ParsedAttribute? attribute) =>
+        attribute is null ? null : CreateLocation(sourceText, razorPath, attribute.Value.NameSpan);
+
     private readonly struct ParsedTag
     {
-        public ParsedTag(string name, TextSpan nameSpan, string attributes, bool isClosingTag, bool isSelfClosing, int endIndex)
+        public ParsedTag(string name, TextSpan nameSpan, ImmutableArray<ParsedAttribute> attributes, bool isClosingTag, bool isSelfClosing, int endIndex)
         {
             Name = name;
             NameSpan = nameSpan;
@@ -397,13 +540,26 @@ internal static class RazorMarkupAnalyzer
 
         public TextSpan NameSpan { get; }
 
-        public string Attributes { get; }
+        public ImmutableArray<ParsedAttribute> Attributes { get; }
 
         public bool IsClosingTag { get; }
 
         public bool IsSelfClosing { get; }
 
         public int EndIndex { get; }
+    }
+
+    private readonly struct ParsedAttribute
+    {
+        public ParsedAttribute(string name, TextSpan nameSpan)
+        {
+            Name = name;
+            NameSpan = nameSpan;
+        }
+
+        public string Name { get; }
+
+        public TextSpan NameSpan { get; }
     }
 
     private readonly struct TagFrame
@@ -429,14 +585,16 @@ internal sealed class RazorMarkupAnalysis
         bool hasBoundaryRoot,
         bool boundaryRootHasErrorContent,
         bool boundaryRootIsKeyed,
-        Location? firstUnprotectedRootLocation,
-        Location? boundaryRootLocation)
+        Location? boundaryRootLocation,
+        ImmutableArray<RazorMarkupRegion> htmlInteractiveRegions,
+        ImmutableArray<RazorComponentRoot> componentRoots)
     {
         HasBoundaryRoot = hasBoundaryRoot;
         BoundaryRootHasErrorContent = boundaryRootHasErrorContent;
         BoundaryRootIsKeyed = boundaryRootIsKeyed;
-        FirstUnprotectedRootLocation = firstUnprotectedRootLocation;
         BoundaryRootLocation = boundaryRootLocation;
+        HtmlInteractiveRegions = htmlInteractiveRegions;
+        ComponentRoots = componentRoots;
     }
 
     public bool HasBoundaryRoot { get; }
@@ -445,7 +603,41 @@ internal sealed class RazorMarkupAnalysis
 
     public bool BoundaryRootIsKeyed { get; }
 
-    public Location? FirstUnprotectedRootLocation { get; }
-
     public Location? BoundaryRootLocation { get; }
+
+    public ImmutableArray<RazorMarkupRegion> HtmlInteractiveRegions { get; }
+
+    public ImmutableArray<RazorComponentRoot> ComponentRoots { get; }
+}
+
+internal readonly struct RazorMarkupRegion
+{
+    public RazorMarkupRegion(InteractiveRenderRegionKind kind, string tagName, Location diagnosticLocation)
+    {
+        Kind = kind;
+        TagName = tagName;
+        DiagnosticLocation = diagnosticLocation;
+    }
+
+    public InteractiveRenderRegionKind Kind { get; }
+
+    public string TagName { get; }
+
+    public Location DiagnosticLocation { get; }
+}
+
+internal readonly struct RazorComponentRoot
+{
+    public RazorComponentRoot(string tagName, Location rootLocation, Location? bindingLocation)
+    {
+        TagName = tagName;
+        RootLocation = rootLocation;
+        BindingLocation = bindingLocation;
+    }
+
+    public string TagName { get; }
+
+    public Location RootLocation { get; }
+
+    public Location? BindingLocation { get; }
 }
