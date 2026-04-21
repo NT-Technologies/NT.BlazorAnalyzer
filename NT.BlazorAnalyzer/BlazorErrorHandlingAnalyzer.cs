@@ -108,13 +108,20 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     SyntaxKind.MethodDeclaration);
 
                 symbolStartContext.RegisterSymbolEndAction(symbolEndContext =>
+                {
+                    ReportLocalLifecycleTryCatchDiagnostics(
+                        symbolEndContext,
+                        componentSymbol,
+                        localMethodAnalyses);
+
                     ReportLocalMissingTryCatchDiagnostics(
                         symbolEndContext,
                         componentSymbol,
                         localBuildRenderTreeRootMethods,
                         localMethodAnalyses,
                         locallyReportedMissingTryCatchMethods,
-                        boundaryCoverageResolver));
+                        boundaryCoverageResolver);
+                });
             }, SymbolKind.NamedType);
 
             compilationStartContext.RegisterSyntaxNodeAction(
@@ -368,15 +375,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        if (analysis.IsLifecycleMethod && analysis.HasOperationalCode && !analysis.HasTryCatch)
-        {
-            context.ReportDiagnostic(Diagnostic.Create(
-                DiagnosticDescriptors.LifecycleMissingTryCatch,
-                methodLocation,
-                methodSymbol.Name,
-                containingType.Name));
-        }
-
         if (analysis.IsDisposeMethod && analysis.HasOperationalCode && !analysis.HasTryCatch)
         {
             context.ReportDiagnostic(Diagnostic.Create(
@@ -518,6 +516,35 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 methodLocation,
                 method.Name,
                 componentSymbol.Name));
+        }
+    }
+
+    private static void ReportLocalLifecycleTryCatchDiagnostics(
+        SymbolAnalysisContext context,
+        INamedTypeSymbol componentSymbol,
+        ConcurrentDictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses)
+    {
+        foreach (var method in localMethodAnalyses.Keys
+                     .Distinct<IMethodSymbol>(SymbolEqualityComparer.Default)
+                     .OrderBy(static method => method.GetPreferredSourceLocation().TryGetStartLine() ?? int.MaxValue))
+        {
+            if (!ShouldReportLifecycleMissingTryCatch(method, localMethodAnalyses))
+            {
+                continue;
+            }
+
+            var methodLocation = method.GetPreferredSourceLocation();
+            if (methodLocation is null)
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(
+                DiagnosticDescriptors.LifecycleMissingTryCatch,
+                methodLocation,
+                method.Name,
+                componentSymbol.Name,
+                GetLifecycleRiskLabel(method)));
         }
     }
 
@@ -1425,9 +1452,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         methodDeclaration.Modifiers.Any(static modifier => modifier.IsKind(SyntaxKind.AsyncKeyword));
 
     private static bool HasSpecificTryCatchDiagnostic(MethodAnalysis analysis) =>
-        !analysis.HasTryCatch &&
-        ((analysis.IsLifecycleMethod && analysis.HasOperationalCode) ||
-         (analysis.IsDisposeMethod && analysis.HasOperationalCode) ||
+        ((!analysis.HasTryCatch && analysis.IsLifecycleMethod && analysis.HasFailureProneOperation) ||
+         (!analysis.HasTryCatch && analysis.IsDisposeMethod && analysis.HasOperationalCode) ||
          analysis.HasJsInteropCalls);
 
     private static bool HasOperationalCode(MethodDeclarationSyntax methodDeclaration)
@@ -1480,14 +1506,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
     {
         var unsafeMethods = ImmutableHashSet.CreateBuilder<IMethodSymbol>(SymbolEqualityComparer.Default);
-        var effectiveSafetyCache = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
-        var visitingEffectiveSafety = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
-        var failureProneCache = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
-        var visitingFailureProne = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
 
         foreach (var rootMethod in rootMethods)
         {
-            if (IsEffectivelySafe(rootMethod) || !HasFailurePronePath(rootMethod))
+            if (IsEffectivelyHandledByDelegation(rootMethod, methodAnalyses) ||
+                !HasFailurePronePath(rootMethod, methodAnalyses))
             {
                 continue;
             }
@@ -1496,64 +1519,145 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         return unsafeMethods.ToImmutable();
+    }
 
-        bool IsEffectivelySafe(IMethodSymbol method)
+    private static bool ShouldReportLifecycleMissingTryCatch(
+        IMethodSymbol method,
+        IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
+    {
+        if (!methodAnalyses.TryGetValue(method, out var analysis) ||
+            !analysis.IsLifecycleMethod ||
+            !HasFailurePronePath(method, methodAnalyses))
         {
-            if (effectiveSafetyCache.TryGetValue(method, out var cached))
+            return false;
+        }
+
+        return !HasMeaningfulLifecycleHandling(method, methodAnalyses);
+    }
+
+    private static bool HasMeaningfulLifecycleHandling(
+        IMethodSymbol method,
+        IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
+    {
+        var effectiveHandlingCache = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
+        var visitingEffectiveHandling = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+
+        return IsEffectivelyHandled(method);
+
+        bool IsEffectivelyHandled(IMethodSymbol currentMethod)
+        {
+            if (effectiveHandlingCache.TryGetValue(currentMethod, out var cached))
             {
                 return cached;
             }
 
-            if (!methodAnalyses.TryGetValue(method, out var analysis))
+            if (!methodAnalyses.TryGetValue(currentMethod, out var analysis))
             {
                 return false;
             }
 
             if (analysis.HasTryCatch)
             {
-                effectiveSafetyCache[method] = true;
-                return true;
+                var meaningfulHandling = analysis.CatchWithoutLoggingLocations.IsEmpty;
+                effectiveHandlingCache[currentMethod] = meaningfulHandling;
+                return meaningfulHandling;
             }
 
-            if (analysis.DelegatedMethod is null || !visitingEffectiveSafety.Add(method))
+            if (analysis.DelegatedMethod is null || !visitingEffectiveHandling.Add(currentMethod))
             {
-                effectiveSafetyCache[method] = false;
+                effectiveHandlingCache[currentMethod] = false;
                 return false;
             }
 
             try
             {
-                var safe = IsEffectivelySafe(analysis.DelegatedMethod);
-                effectiveSafetyCache[method] = safe;
-                return safe;
+                var handled = IsEffectivelyHandled(analysis.DelegatedMethod);
+                effectiveHandlingCache[currentMethod] = handled;
+                return handled;
             }
             finally
             {
-                visitingEffectiveSafety.Remove(method);
+                visitingEffectiveHandling.Remove(currentMethod);
             }
         }
+    }
 
-        bool HasFailurePronePath(IMethodSymbol method)
+    private static bool IsEffectivelyHandledByDelegation(
+        IMethodSymbol method,
+        IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
+    {
+        var effectiveHandlingCache = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
+        var visitingEffectiveHandling = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+
+        return IsEffectivelyHandled(method);
+
+        bool IsEffectivelyHandled(IMethodSymbol currentMethod)
         {
-            if (failureProneCache.TryGetValue(method, out var cached))
+            if (effectiveHandlingCache.TryGetValue(currentMethod, out var cached))
             {
                 return cached;
             }
 
-            if (!methodAnalyses.TryGetValue(method, out var analysis))
+            if (!methodAnalyses.TryGetValue(currentMethod, out var analysis))
+            {
+                return false;
+            }
+
+            if (analysis.HasTryCatch)
+            {
+                effectiveHandlingCache[currentMethod] = true;
+                return true;
+            }
+
+            if (analysis.DelegatedMethod is null || !visitingEffectiveHandling.Add(currentMethod))
+            {
+                effectiveHandlingCache[currentMethod] = false;
+                return false;
+            }
+
+            try
+            {
+                var handled = IsEffectivelyHandled(analysis.DelegatedMethod);
+                effectiveHandlingCache[currentMethod] = handled;
+                return handled;
+            }
+            finally
+            {
+                visitingEffectiveHandling.Remove(currentMethod);
+            }
+        }
+    }
+
+    private static bool HasFailurePronePath(
+        IMethodSymbol method,
+        IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
+    {
+        var failureProneCache = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
+        var visitingFailureProne = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+
+        return HasFailurePronePathCore(method);
+
+        bool HasFailurePronePathCore(IMethodSymbol currentMethod)
+        {
+            if (failureProneCache.TryGetValue(currentMethod, out var cached))
+            {
+                return cached;
+            }
+
+            if (!methodAnalyses.TryGetValue(currentMethod, out var analysis))
             {
                 return false;
             }
 
             if (analysis.HasFailureProneOperation)
             {
-                failureProneCache[method] = true;
+                failureProneCache[currentMethod] = true;
                 return true;
             }
 
-            if (!visitingFailureProne.Add(method))
+            if (!visitingFailureProne.Add(currentMethod))
             {
-                failureProneCache[method] = false;
+                failureProneCache[currentMethod] = false;
                 return false;
             }
 
@@ -1561,28 +1665,35 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             {
                 foreach (var callee in analysis.Callees)
                 {
-                    if (HasFailurePronePath(callee))
+                    if (HasFailurePronePathCore(callee))
                     {
-                        failureProneCache[method] = true;
+                        failureProneCache[currentMethod] = true;
                         return true;
                     }
                 }
 
-                if (analysis.DelegatedMethod is not null && HasFailurePronePath(analysis.DelegatedMethod))
+                if (analysis.DelegatedMethod is not null && HasFailurePronePathCore(analysis.DelegatedMethod))
                 {
-                    failureProneCache[method] = true;
+                    failureProneCache[currentMethod] = true;
                     return true;
                 }
 
-                failureProneCache[method] = false;
+                failureProneCache[currentMethod] = false;
                 return false;
             }
             finally
             {
-                visitingFailureProne.Remove(method);
+                visitingFailureProne.Remove(currentMethod);
             }
         }
     }
+
+    private static string GetLifecycleRiskLabel(IMethodSymbol methodSymbol) =>
+        methodSymbol.Name switch
+        {
+            "OnAfterRender" or "OnAfterRenderAsync" => "after-render",
+            _ => "early"
+        };
 
     private static RenderTreeAnalysis AnalyzeBuildRenderTree(
         BlockSyntax body,

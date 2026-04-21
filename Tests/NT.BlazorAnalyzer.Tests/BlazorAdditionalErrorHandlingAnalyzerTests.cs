@@ -31,6 +31,103 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
     }
 
     [Fact]
+    public async Task LifecycleMethod_WithOnlyTrivialLocalStateMutation_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "TrivialLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    protected override void OnParametersSet()
+                    {
+                        currentCount++;
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_DelegatingToSafeHelper_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "DelegatedLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private Logger Logger { get; } = new Logger();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                        => await RunSafelyAsync();
+
+                    private async global::System.Threading.Tasks.Task RunSafelyAsync()
+                    {
+                        try
+                        {
+                            await LoadAsync();
+                        }
+                        catch (global::System.Exception ex)
+                        {
+                            Logger.LogError(ex);
+                        }
+                    }
+
+                    private async global::System.Threading.Tasks.Task LoadAsync()
+                    {
+                        await global::System.Threading.Tasks.Task.Yield();
+                        throw new global::System.InvalidOperationException();
+                    }
+
+                    private sealed class Logger
+                    {
+                        public void LogError(global::System.Exception ex)
+                        {
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithSwallowedCatch_StillReportsNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "SwallowedLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        try
+                        {
+                            await LoadAsync();
+                        }
+                        catch (global::System.Exception)
+                        {
+                        }
+                    }
+
+                    private async global::System.Threading.Tasks.Task LoadAsync()
+                    {
+                        await global::System.Threading.Tasks.Task.CompletedTask;
+                    }
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
+    }
+
+    [Fact]
     public async Task DisposeMethod_WithoutTryCatch_ReportsNtba0004()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(

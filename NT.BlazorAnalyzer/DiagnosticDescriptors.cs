@@ -28,12 +28,12 @@ internal static class DiagnosticDescriptors
 
     public static readonly DiagnosticDescriptor LifecycleMissingTryCatch = new(
         id: "NTBA0003",
-        title: "Lifecycle method should use try/catch",
-        messageFormat: "Lifecycle method '{0}' in interactive component '{1}' should protect operational code with try/catch",
+        title: "Lifecycle method should use meaningful exception handling",
+        messageFormat: "{2} lifecycle method '{0}' in interactive component '{1}' performs failure-prone work without meaningful exception handling",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Interactive Blazor lifecycle methods should use try/catch around operational code to avoid unhandled circuit failures.");
+        description: "Failure-prone interactive Blazor lifecycle methods should use meaningful exception handling. Early lifecycle failures are especially risky during prerendering and circuit initialization, and delegation to a safe handler is acceptable.");
 
     public static readonly DiagnosticDescriptor DisposeMissingTryCatch = new(
         id: "NTBA0004",

@@ -55,7 +55,7 @@ Diagnostic text:
 
 ### `NTBA0003`
 
-Warning when an interactive lifecycle method with operational code does not use `try/catch`.
+Warning when an interactive lifecycle method performs failure-prone work without meaningful exception handling.
 
 Covered lifecycle methods:
 - `OnInitialized`
@@ -65,6 +65,12 @@ Covered lifecycle methods:
 - `OnAfterRender`
 - `OnAfterRenderAsync`
 - `SetParametersAsync`
+
+Notes:
+- early lifecycle methods are treated as the highest-risk surface because unhandled failures can break prerendering or circuit initialization
+- pure delegation to a safe local helper is accepted
+- trivial local state mutation alone does not trigger `NTBA0003`
+- a swallowed catch can still trigger `NTBA0003` alongside `NTBA0008`
 
 ### `NTBA0004`
 
@@ -341,7 +347,11 @@ Why:
         await LoadAsync();
     }
 
-    private Task LoadAsync() => Task.CompletedTask;
+    private async Task LoadAsync()
+    {
+        await Task.CompletedTask;
+        throw new InvalidOperationException();
+    }
 }
 ```
 
