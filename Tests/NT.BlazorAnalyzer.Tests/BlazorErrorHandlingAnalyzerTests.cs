@@ -32,7 +32,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                 razorMethods: """
                     private void IncrementCount()
                     {
-                        currentCount++;
+                        throw new global::System.InvalidOperationException();
                     }
                     """,
                 baseType: "global::Microsoft.AspNetCore.Components.Web.ErrorBoundary"));
@@ -485,7 +485,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                 razorMethods: """
                     private void HandleClick()
                     {
-                        currentCount++;
+                        throw new global::System.InvalidOperationException();
                     }
                     """));
 
@@ -574,7 +574,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                 razorMethods: """
                     private void IncrementCount()
                     {
-                        currentCount++;
+                        throw new global::System.InvalidOperationException();
                     }
 
                     private void IncrementSafely()
@@ -665,7 +665,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
     }
 
     [Fact]
-    public async Task InteractiveComponent_HelperCalledFromCaughtAndUncaughtRoots_ReportsHelperAndUncaughtRoot()
+    public async Task InteractiveComponent_HelperCalledFromCaughtAndUncaughtRoots_ReportsOnlyUncaughtRoot()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -698,19 +698,21 @@ public sealed class BlazorErrorHandlingAnalyzerTests
 
                     private void IncrementCore()
                     {
-                        currentCount++;
+                        ThrowNow();
                     }
+
+                    private void ThrowNow() => throw new global::System.InvalidOperationException();
                     """));
 
         var missingBoundaryDiagnostics = diagnostics.Where(diagnostic => diagnostic.Id == "NTBA0001").ToArray();
 
-        Assert.Equal(4, diagnostics.Count);
+        Assert.Equal(3, diagnostics.Count);
         Assert.Equal(2, missingBoundaryDiagnostics.Length);
         Assert.NotEqual(
             missingBoundaryDiagnostics[0].Location.GetLineSpan().StartLinePosition.Line,
             missingBoundaryDiagnostics[1].Location.GetLineSpan().StartLinePosition.Line);
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("HandleUnsafe", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("IncrementCore", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("IncrementCore", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -740,7 +742,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
     }
 
     [Fact]
-    public async Task InteractiveComponent_ExpressionBodiedRootMethod_ReportsMissingTryCatch()
+    public async Task InteractiveComponent_ExpressionBodiedRootMethod_WithOnlyLocalStateMutation_DoesNotReportMissingTryCatch()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -752,12 +754,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
 
         Assert.Collection(
             diagnostics,
-            diagnostic => Assert.Equal("NTBA0001", diagnostic.Id),
-            diagnostic =>
-            {
-                Assert.Equal("NTBA0002", diagnostic.Id);
-                Assert.Contains("IncrementCount", diagnostic.GetMessage(), StringComparison.Ordinal);
-            });
+            diagnostic => Assert.Equal("NTBA0001", diagnostic.Id));
     }
 
     [Fact]
@@ -840,11 +837,10 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                     }
                     """));
 
-        Assert.Equal(4, diagnostics.Count);
+        Assert.Equal(2, diagnostics.Count);
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("UncoveredParent", StringComparison.Ordinal));
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("Child", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("UncoveredParent", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("Child", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0002");
     }
 
     [Fact]
@@ -919,12 +915,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
 
         Assert.Collection(
             diagnostics,
-            diagnostic => Assert.Equal("NTBA0001", diagnostic.Id),
-            diagnostic =>
-            {
-                Assert.Equal("NTBA0002", diagnostic.Id);
-                Assert.Contains("Child", diagnostic.GetMessage(), StringComparison.Ordinal);
-            });
+            diagnostic => Assert.Equal("NTBA0001", diagnostic.Id));
     }
 
     [Fact]
@@ -975,12 +966,48 @@ public sealed class BlazorErrorHandlingAnalyzerTests
 
         Assert.Collection(
             diagnostics,
-            diagnostic => Assert.Equal("NTBA0001", diagnostic.Id),
-            diagnostic =>
-            {
-                Assert.Equal("NTBA0002", diagnostic.Id);
-                Assert.Contains("Child", diagnostic.GetMessage(), StringComparison.Ordinal);
-            });
+            diagnostic => Assert.Equal("NTBA0001", diagnostic.Id));
+    }
+
+    [Fact]
+    public async Task InteractiveComponent_WithProtectedRiskyRootAndUncoveredTrivialRoot_DoesNotReportNtba0002()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "MixedRoots",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "button");
+                    __builder.AddAttribute(1, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create<global::Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, HandleTrivial));
+                    __builder.CloseElement();
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(2);
+                    __builder.AddAttribute(3, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(4, "button");
+                        __builder2.AddAttribute(5, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create<global::Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, HandleRisky));
+                        __builder2.CloseElement();
+                    }));
+                    __builder.AddAttribute(6, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(7, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private void HandleTrivial()
+                    {
+                        currentCount++;
+                    }
+
+                    private void HandleRisky()
+                    {
+                        throw new global::System.InvalidOperationException();
+                    }
+                    """));
+
+        Assert.Collection(
+            diagnostics,
+            diagnostic => Assert.Equal("NTBA0001", diagnostic.Id));
     }
 
     [Fact]

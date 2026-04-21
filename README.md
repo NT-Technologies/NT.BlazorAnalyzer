@@ -40,16 +40,18 @@ Diagnostic text:
 
 ### `NTBA0002`
 
-Warning when a method reachable from an independently interactive render region without `ErrorBoundary` coverage can be reached without `try/catch` handling.
+Warning when an interactive entry method reachable from an independently interactive render region without `ErrorBoundary` coverage performs failure-prone work without `try/catch` handling.
 
 This rule is entrypoint-oriented, not helper-oriented:
-- root/API methods should be protected
+- only interactive entry methods discovered from uncovered render regions are considered
 - helper methods do not need their own `try/catch` when every reachable caller already has one
 - a wrapper method does not need a warning if it only delegates to another safe member method
-- a helper method does warn if at least one uncaught root path reaches it
+- helper methods do not warn on their own, even when they contain the risky operation
+- trivial local state mutation alone does not trigger `NTBA0002`
+- lifecycle, dispose, and JS interop concerns are still covered by `NTBA0003` through `NTBA0006`
 
 Diagnostic text:
-`Method '{MethodName}' in interactive component '{ComponentName}' can be reached without try/catch handling`
+`Method '{MethodName}' in interactive component '{ComponentName}' performs failure-prone work reachable from an uncovered interactive region without try/catch handling`
 
 ### `NTBA0003`
 
@@ -109,16 +111,14 @@ Warning when a layout component uses a root `ErrorBoundary`. Prefer placing boun
 @code {
     private void IncrementCount()
     {
-        CurrentCount++;
+        throw new InvalidOperationException();
     }
-
-    private int CurrentCount { get; set; }
 }
 ```
 
 Why:
 - the button creates an independently interactive region and is not protected by `ErrorBoundary`
-- `IncrementCount` is a UI entry method and has no `try/catch`
+- `IncrementCount` is an uncovered interactive entry method and performs failure-prone work without `try/catch`
 
 ### Emits `NTBA0001` for a component callback root
 
@@ -198,14 +198,14 @@ public partial class MyComponent : ErrorBoundary
 {
     private void HandleClick()
     {
-        DoWork();
+        throw new InvalidOperationException();
     }
 }
 ```
 
 If the generated `BuildRenderTree` contains an unprotected independently interactive region, the component still warns. The rule is based on rendered regions, not the component base type.
 
-### Emits `NTBA0002` on an uncaught root and helper
+### Emits `NTBA0002` only on an uncaught root when a helper path is failure-prone
 
 ```razor
 @rendermode InteractiveServer
@@ -232,16 +232,17 @@ If the generated `BuildRenderTree` contains an unprotected independently interac
 
     private void IncrementCore()
     {
-        CurrentCount++;
+        ThrowNow();
     }
 
-    private int CurrentCount { get; set; }
+    private void ThrowNow() => throw new InvalidOperationException();
 }
 ```
 
 Why:
-- `HandleUnsafe` is reachable without `try/catch`
-- `IncrementCore` is also reachable from an uncaught root path
+- `HandleUnsafe` is an uncovered interactive entry method
+- the reachable helper path is failure-prone
+- `IncrementCore` does not get its own `NTBA0002`; the warning stays on the entry method
 
 ### Does not emit `NTBA0002` for a helper used only from caught roots
 

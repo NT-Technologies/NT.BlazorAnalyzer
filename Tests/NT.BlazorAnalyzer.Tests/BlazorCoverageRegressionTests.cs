@@ -5,7 +5,7 @@ namespace NT.BlazorAnalyzer.Tests;
 public sealed class BlazorCoverageRegressionTests
 {
     [Fact]
-    public async Task InteractiveComponent_DeclarationOnlyPartialMethod_IsIgnoredAsApiEntryPoint()
+    public async Task InteractiveComponent_DeclarationOnlyPartialMethod_DoesNotAffectInteractiveRootDiagnostics()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -14,7 +14,7 @@ public sealed class BlazorCoverageRegressionTests
                 razorMethods: """
                     private void HandleClick()
                     {
-                        currentCount++;
+                        throw new global::System.InvalidOperationException();
                     }
 
                     partial void HelperDeclarationOnly();
@@ -181,7 +181,7 @@ public sealed class BlazorCoverageRegressionTests
     }
 
     [Fact]
-    public async Task TryFinallyWithoutCatch_ReportsNtba0002()
+    public async Task TryFinallyWithoutCatch_ReportsNtba0002_WhenTheRootDoesFailureProneWork()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -192,7 +192,7 @@ public sealed class BlazorCoverageRegressionTests
                     {
                         try
                         {
-                            currentCount++;
+                            global::System.Console.WriteLine(currentCount);
                         }
                         finally
                         {
@@ -205,7 +205,7 @@ public sealed class BlazorCoverageRegressionTests
     }
 
     [Fact]
-    public async Task RecursiveDelegation_IsNotTreatedAsSafe()
+    public async Task RecursiveDelegation_WithoutFailureProneWork_DoesNotReportNtba0002()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -217,9 +217,9 @@ public sealed class BlazorCoverageRegressionTests
                     private void HandleClickCore() => HandleClick();
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("HandleClick", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("HandleClickCore", StringComparison.Ordinal));
+        Assert.Collection(
+            diagnostics,
+            diagnostic => Assert.Equal("NTBA0001", diagnostic.Id));
     }
 
     [Fact]

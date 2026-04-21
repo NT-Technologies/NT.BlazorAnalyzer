@@ -18,12 +18,12 @@ internal static class DiagnosticDescriptors
 
     public static readonly DiagnosticDescriptor MissingTryCatch = new(
         id: "NTBA0002",
-        title: "Component method should use try/catch",
-        messageFormat: "Method '{0}' in interactive component '{1}' can be reached without try/catch handling",
+        title: "Uncovered interactive entry method should use try/catch",
+        messageFormat: "Method '{0}' in interactive component '{1}' performs failure-prone work reachable from an uncovered interactive region without try/catch handling",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Methods that can be reached from an independently interactive render region without ErrorBoundary coverage should be reached only through try/catch handling or delegate entirely to a safe member method.",
+        description: "Failure-prone interactive entry methods reachable from independently interactive render regions without ErrorBoundary coverage should use try/catch handling or delegate entirely to a safe member method.",
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
     public static readonly DiagnosticDescriptor LifecycleMissingTryCatch = new(

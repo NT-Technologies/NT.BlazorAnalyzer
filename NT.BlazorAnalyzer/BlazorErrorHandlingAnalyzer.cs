@@ -101,6 +101,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     syntaxContext => CollectLocalMissingTryCatchAnalysis(
                         syntaxContext,
                         componentBaseSymbol,
+                        errorBoundarySymbol,
                         componentSymbol,
                         localBuildRenderTreeRootMethods,
                         localMethodAnalyses),
@@ -254,7 +255,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 return;
             }
 
-            var renderTreeAnalysis = AnalyzeBuildRenderTree(methodDeclaration.Body, context.SemanticModel, componentBaseSymbol, errorBoundarySymbol, context.CancellationToken);
+            var renderTreeAnalysis = AnalyzeBuildRenderTree(
+                methodDeclaration.Body,
+                context.SemanticModel,
+                componentBaseSymbol,
+                errorBoundarySymbol,
+                context.CancellationToken);
             if (renderTreeAnalysis.RootBoundaryComponent is not null)
             {
                 rootBoundaryComponents[containingType] = renderTreeAnalysis.RootBoundaryComponent;
@@ -325,7 +331,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     containingType.Name));
             }
 
-            foreach (var referencedMethod in GetBuildRenderTreeReferencedMethods(methodDeclaration, context.SemanticModel, containingType, context.CancellationToken))
+            foreach (var referencedMethod in uncoveredRegions.SelectMany(static region => region.RootMethods))
             {
                 buildRenderTreeRootMethods.TryAdd(referencedMethod, 0);
             }
@@ -420,6 +426,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static void CollectLocalMissingTryCatchAnalysis(
         SyntaxNodeAnalysisContext context,
         INamedTypeSymbol componentBaseSymbol,
+        INamedTypeSymbol errorBoundarySymbol,
         INamedTypeSymbol componentSymbol,
         ConcurrentDictionary<IMethodSymbol, byte> localBuildRenderTreeRootMethods,
         ConcurrentDictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses)
@@ -439,7 +446,18 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         if (methodSymbol.Name == "BuildRenderTree")
         {
-            foreach (var referencedMethod in GetBuildRenderTreeReferencedMethods(methodDeclaration, context.SemanticModel, componentSymbol, context.CancellationToken))
+            if (methodDeclaration.Body is null)
+            {
+                return;
+            }
+
+            var renderTreeAnalysis = AnalyzeBuildRenderTree(
+                methodDeclaration.Body,
+                context.SemanticModel,
+                componentBaseSymbol,
+                errorBoundarySymbol,
+                context.CancellationToken);
+            foreach (var referencedMethod in renderTreeAnalysis.UncoveredRegions.SelectMany(static region => region.RootMethods))
             {
                 localBuildRenderTreeRootMethods.TryAdd(referencedMethod, 0);
             }
@@ -474,15 +492,15 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             .Distinct<IMethodSymbol>(SymbolEqualityComparer.Default)
             .ToArray();
         var rootMethods = methods
-            .Where(method => localMethodAnalyses[method].IsApiRootCandidate || localBuildRenderTreeRootMethods.ContainsKey(method))
+            .Where(localBuildRenderTreeRootMethods.ContainsKey)
             .Distinct<IMethodSymbol>(SymbolEqualityComparer.Default)
             .ToArray();
         var methodsWithSpecificTryCatchDiagnostics = methods
             .Where(method => HasSpecificTryCatchDiagnostic(localMethodAnalyses[method]))
             .ToImmutableHashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
-        var unsafeMethods = FindUnsafeReachableMethods(rootMethods, localMethodAnalyses);
+        var unsafeMethods = FindUnsafeRootMethods(rootMethods, localMethodAnalyses);
 
-                foreach (var method in unsafeMethods.OrderBy(static method => method.GetPreferredSourceLocation().TryGetStartLine() ?? int.MaxValue))
+        foreach (var method in unsafeMethods.OrderBy(static method => method.GetPreferredSourceLocation().TryGetStartLine() ?? int.MaxValue))
         {
             if (methodsWithSpecificTryCatchDiagnostics.Contains(method) || !locallyReportedMissingTryCatchMethods.TryAdd(method, 0))
             {
@@ -591,7 +609,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 .ToArray();
 
             var rootMethods = methods
-                .Where(method => methodAnalyses[method].IsApiRootCandidate || buildRenderTreeRootMethods.ContainsKey(method))
+                .Where(buildRenderTreeRootMethods.ContainsKey)
                 .Distinct<IMethodSymbol>(SymbolEqualityComparer.Default)
                 .ToArray();
 
@@ -601,7 +619,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
             if (!boundaryProtected)
             {
-                var unsafeMethods = FindUnsafeReachableMethods(rootMethods, methodAnalyses);
+                var unsafeMethods = FindUnsafeRootMethods(rootMethods, methodAnalyses);
                 foreach (var method in unsafeMethods.OrderBy(static method => method.Locations.FirstOrDefault(static location => location.IsInSource).TryGetStartLine() ?? int.MaxValue))
                 {
                     if (methodsWithSpecificTryCatchDiagnostics.Contains(method) ||
@@ -1383,20 +1401,15 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             hasTryCatch: MethodContainsTryCatch(methodDeclaration),
             callees: callees.ToImmutable(),
             delegatedMethod: GetDelegatedMethod(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken),
-            isApiRootCandidate: IsApiRootCandidate(methodSymbol),
             isLifecycleMethod: IsLifecycleMethod(methodSymbol),
             isDisposeMethod: IsDisposeMethod(methodSymbol),
             hasOperationalCode: HasOperationalCode(methodDeclaration),
+            hasFailureProneOperation: HasFailureProneOperation(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken),
             hasJsInteropCalls: jsInteropCalls.Length > 0,
             hasUnsafeLifecycleJsInterop: IsPreRenderLifecycleMethod(methodSymbol) && jsInteropCalls.Any(call => !IsWithinInteractivityGuard(call)),
             isAsyncVoid: IsAsyncVoid(methodDeclaration, methodSymbol),
             catchWithoutLoggingLocations: GetCatchWithoutLoggingLocations(methodDeclaration, semanticModel, cancellationToken));
     }
-
-    private static bool IsApiRootCandidate(IMethodSymbol methodSymbol) =>
-        methodSymbol.DeclaredAccessibility != Accessibility.Private ||
-        methodSymbol.IsOverride ||
-        methodSymbol.ExplicitInterfaceImplementations.Length > 0;
 
     private static bool IsLifecycleMethod(IMethodSymbol methodSymbol) =>
         methodSymbol.Name is "OnInitialized" or "OnInitializedAsync" or "OnParametersSet" or "OnParametersSetAsync" or "OnAfterRender" or "OnAfterRenderAsync" or "SetParametersAsync";
@@ -1429,47 +1442,60 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             node is InvocationExpressionSyntax or AwaitExpressionSyntax or ThrowStatementSyntax or ObjectCreationExpressionSyntax);
     }
 
-    private static ImmutableHashSet<IMethodSymbol> FindUnsafeReachableMethods(
+    private static bool HasFailureProneOperation(
+        MethodDeclarationSyntax methodDeclaration,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken)
+    {
+        var rootNode = GetMethodExecutableRoot(methodDeclaration);
+        if (rootNode is null)
+        {
+            return false;
+        }
+
+        foreach (var node in rootNode.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node)))
+        {
+            switch (node)
+            {
+                case ThrowStatementSyntax:
+                case ThrowExpressionSyntax:
+                    return true;
+
+                case AwaitExpressionSyntax awaitExpression
+                    when GetInvokedMemberMethod(awaitExpression.Expression, semanticModel, containingType, cancellationToken) is null:
+                    return true;
+
+                case InvocationExpressionSyntax invocation
+                    when GetInvokedMemberMethod(invocation, semanticModel, containingType, cancellationToken) is null:
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static ImmutableHashSet<IMethodSymbol> FindUnsafeRootMethods(
         IEnumerable<IMethodSymbol> rootMethods,
         IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
     {
         var unsafeMethods = ImmutableHashSet.CreateBuilder<IMethodSymbol>(SymbolEqualityComparer.Default);
-        var visitedProtected = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
-        var visitedUnprotected = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
         var effectiveSafetyCache = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
         var visitingEffectiveSafety = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        var failureProneCache = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
+        var visitingFailureProne = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
 
         foreach (var rootMethod in rootMethods)
         {
-            Visit(rootMethod, callerProtected: false);
+            if (IsEffectivelySafe(rootMethod) || !HasFailurePronePath(rootMethod))
+            {
+                continue;
+            }
+
+            unsafeMethods.Add(rootMethod);
         }
 
         return unsafeMethods.ToImmutable();
-
-        void Visit(IMethodSymbol method, bool callerProtected)
-        {
-            if (!methodAnalyses.TryGetValue(method, out var analysis))
-            {
-                return;
-            }
-
-            var visited = callerProtected ? visitedProtected : visitedUnprotected;
-            if (!visited.Add(method))
-            {
-                return;
-            }
-
-            if (!callerProtected && !IsEffectivelySafe(method))
-            {
-                unsafeMethods.Add(method);
-            }
-
-            var descendantProtected = callerProtected || analysis.HasTryCatch;
-            foreach (var callee in analysis.Callees)
-            {
-                Visit(callee, descendantProtected);
-            }
-        }
 
         bool IsEffectivelySafe(IMethodSymbol method)
         {
@@ -1504,6 +1530,56 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             finally
             {
                 visitingEffectiveSafety.Remove(method);
+            }
+        }
+
+        bool HasFailurePronePath(IMethodSymbol method)
+        {
+            if (failureProneCache.TryGetValue(method, out var cached))
+            {
+                return cached;
+            }
+
+            if (!methodAnalyses.TryGetValue(method, out var analysis))
+            {
+                return false;
+            }
+
+            if (analysis.HasFailureProneOperation)
+            {
+                failureProneCache[method] = true;
+                return true;
+            }
+
+            if (!visitingFailureProne.Add(method))
+            {
+                failureProneCache[method] = false;
+                return false;
+            }
+
+            try
+            {
+                foreach (var callee in analysis.Callees)
+                {
+                    if (HasFailurePronePath(callee))
+                    {
+                        failureProneCache[method] = true;
+                        return true;
+                    }
+                }
+
+                if (analysis.DelegatedMethod is not null && HasFailurePronePath(analysis.DelegatedMethod))
+                {
+                    failureProneCache[method] = true;
+                    return true;
+                }
+
+                failureProneCache[method] = false;
+                return false;
+            }
+            finally
+            {
+                visitingFailureProne.Remove(method);
             }
         }
     }
@@ -1903,7 +1979,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     MarkUnprotectedInteractiveContent(
                         currentNode,
                         InteractiveRenderRegionKind.HtmlEventHandler,
-                        invocation.GetLocation());
+                        invocation.GetLocation(),
+                        GetInteractiveRegionRootMethods(invocation, semanticModel, cancellationToken));
                 }
 
                 return;
@@ -1914,7 +1991,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 MarkUnprotectedInteractiveContent(
                     currentNode,
                     regionKind,
-                    invocation.GetLocation());
+                    invocation.GetLocation(),
+                    GetInteractiveRegionRootMethods(invocation, semanticModel, cancellationToken));
             }
         }
 
@@ -1957,20 +2035,28 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         private void MarkUnprotectedInteractiveContent(
             NodeFrame currentNode,
             InteractiveRenderRegionKind regionKind,
-            Location location)
+            Location location,
+            ImmutableHashSet<IMethodSymbol> rootMethods)
         {
-            if (currentNode.HasRecordedInteractiveRegion)
+            if (currentNode.RecordedInteractiveRegionIndex >= 0)
             {
+                var existingRegion = uncoveredRegions[currentNode.RecordedInteractiveRegionIndex];
+                if (!rootMethods.IsEmpty)
+                {
+                    uncoveredRegions[currentNode.RecordedInteractiveRegionIndex] = existingRegion.WithRootMethods(existingRegion.RootMethods.Union(rootMethods));
+                }
+
                 return;
             }
 
-            currentNode.HasRecordedInteractiveRegion = true;
+            currentNode.RecordedInteractiveRegionIndex = uncoveredRegions.Count;
             uncoveredRegions.Add(new InteractiveRenderRegion(
                 sourceComponent: null,
                 diagnosticLocation: location,
                 kind: regionKind,
                 hasLocalBoundaryCoverage: false,
-                rootName: currentNode.RootName ?? string.Empty));
+                rootName: currentNode.RootName ?? string.Empty,
+                rootMethods: rootMethods));
         }
 
         private sealed class NodeFrame
@@ -1991,7 +2077,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
             public string? RootName { get; }
 
-            public bool HasRecordedInteractiveRegion { get; set; }
+            public int RecordedInteractiveRegionIndex { get; set; } = -1;
         }
     }
 
@@ -2242,35 +2328,33 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             callbackSymbol.Name == "CreateBinder";
     }
 
-    private static IEnumerable<IMethodSymbol> GetBuildRenderTreeReferencedMethods(
-        MethodDeclarationSyntax methodDeclaration,
+    private static ImmutableHashSet<IMethodSymbol> GetInteractiveRegionRootMethods(
+        InvocationExpressionSyntax invocation,
         SemanticModel semanticModel,
-        INamedTypeSymbol containingType,
         CancellationToken cancellationToken)
     {
-        if (methodDeclaration.Body is null)
+        if (invocation.ArgumentList.Arguments.Count < 3 ||
+            semanticModel.GetEnclosingSymbol(invocation.SpanStart, cancellationToken)?.ContainingType is not INamedTypeSymbol containingType)
         {
-            yield break;
+            return ImmutableHashSet.Create<IMethodSymbol>(SymbolEqualityComparer.Default);
         }
 
-        var seen = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
-        foreach (var expression in methodDeclaration.Body.DescendantNodesAndSelf().OfType<ExpressionSyntax>())
+        var rootMethods = ImmutableHashSet.CreateBuilder<IMethodSymbol>(SymbolEqualityComparer.Default);
+        foreach (var expression in invocation.ArgumentList.Arguments[2].Expression.DescendantNodesAndSelf().OfType<ExpressionSyntax>())
         {
-            var symbol = TryGetSymbol(expression, semanticModel, cancellationToken);
-
-            if (symbol is not IMethodSymbol methodSymbol)
+            if (TryGetSymbol(expression, semanticModel, cancellationToken) is not IMethodSymbol methodSymbol)
             {
                 continue;
             }
 
             methodSymbol = NormalizeMethodSymbol(methodSymbol);
-            if (!IsRelevantMethod(methodSymbol, containingType) || !seen.Add(methodSymbol))
+            if (IsRelevantMethod(methodSymbol, containingType))
             {
-                continue;
+                rootMethods.Add(methodSymbol);
             }
-
-            yield return methodSymbol;
         }
+
+        return rootMethods.ToImmutable();
     }
 
     private static IEnumerable<INamedTypeSymbol> GetReferencedComponentBuildRenderTrees(
@@ -3110,10 +3194,10 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             bool hasTryCatch,
             ImmutableHashSet<IMethodSymbol> callees,
             IMethodSymbol? delegatedMethod,
-            bool isApiRootCandidate,
             bool isLifecycleMethod,
             bool isDisposeMethod,
             bool hasOperationalCode,
+            bool hasFailureProneOperation,
             bool hasJsInteropCalls,
             bool hasUnsafeLifecycleJsInterop,
             bool isAsyncVoid,
@@ -3122,10 +3206,10 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             HasTryCatch = hasTryCatch;
             Callees = callees;
             DelegatedMethod = delegatedMethod;
-            IsApiRootCandidate = isApiRootCandidate;
             IsLifecycleMethod = isLifecycleMethod;
             IsDisposeMethod = isDisposeMethod;
             HasOperationalCode = hasOperationalCode;
+            HasFailureProneOperation = hasFailureProneOperation;
             HasJsInteropCalls = hasJsInteropCalls;
             HasUnsafeLifecycleJsInterop = hasUnsafeLifecycleJsInterop;
             IsAsyncVoid = isAsyncVoid;
@@ -3138,13 +3222,13 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         public IMethodSymbol? DelegatedMethod { get; }
 
-        public bool IsApiRootCandidate { get; }
-
         public bool IsLifecycleMethod { get; }
 
         public bool IsDisposeMethod { get; }
 
         public bool HasOperationalCode { get; }
+
+        public bool HasFailureProneOperation { get; }
 
         public bool HasJsInteropCalls { get; }
 
@@ -3255,18 +3339,22 @@ internal enum InteractiveRenderRegionKind
 
 internal readonly struct InteractiveRenderRegion
 {
+    private static readonly ImmutableHashSet<IMethodSymbol> EmptyRootMethods = ImmutableHashSet.Create<IMethodSymbol>(SymbolEqualityComparer.Default);
+
     public InteractiveRenderRegion(
         INamedTypeSymbol? sourceComponent,
         Location? diagnosticLocation,
         InteractiveRenderRegionKind kind,
         bool hasLocalBoundaryCoverage,
-        string rootName)
+        string rootName,
+        ImmutableHashSet<IMethodSymbol>? rootMethods = null)
     {
         SourceComponent = sourceComponent;
         DiagnosticLocation = diagnosticLocation;
         Kind = kind;
         HasLocalBoundaryCoverage = hasLocalBoundaryCoverage;
         RootName = rootName;
+        RootMethods = rootMethods ?? EmptyRootMethods;
     }
 
     public INamedTypeSymbol? SourceComponent { get; }
@@ -3279,9 +3367,14 @@ internal readonly struct InteractiveRenderRegion
 
     public string RootName { get; }
 
+    public ImmutableHashSet<IMethodSymbol> RootMethods { get; }
+
     public InteractiveRenderRegion WithSourceComponent(INamedTypeSymbol sourceComponent) =>
-        new(sourceComponent, DiagnosticLocation, Kind, HasLocalBoundaryCoverage, RootName);
+        new(sourceComponent, DiagnosticLocation, Kind, HasLocalBoundaryCoverage, RootName, RootMethods);
 
     public InteractiveRenderRegion WithDiagnosticLocation(Location diagnosticLocation) =>
-        new(SourceComponent, diagnosticLocation, Kind, HasLocalBoundaryCoverage, RootName);
+        new(SourceComponent, diagnosticLocation, Kind, HasLocalBoundaryCoverage, RootName, RootMethods);
+
+    public InteractiveRenderRegion WithRootMethods(ImmutableHashSet<IMethodSymbol> rootMethods) =>
+        new(SourceComponent, DiagnosticLocation, Kind, HasLocalBoundaryCoverage, RootName, rootMethods);
 }
