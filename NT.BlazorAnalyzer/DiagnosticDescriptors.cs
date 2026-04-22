@@ -55,12 +55,12 @@ internal static class DiagnosticDescriptors
 
     public static readonly DiagnosticDescriptor JsInteropRequiresInteractivityGuard = new(
         id: "NTBA0006",
-        title: "JS interop should be guarded by interactivity in early lifecycle methods",
-        messageFormat: "Lifecycle method '{0}' in interactive component '{1}' performs JS interop before OnAfterRender without an interactivity guard",
+        title: "Early lifecycle JS interop should use a recognized interactivity check",
+        messageFormat: "Lifecycle method '{0}' in interactive component '{1}' performs JS interop before OnAfterRender without a recognized interactivity check",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "JS interop in initialization and parameter lifecycle methods should be guarded by an interactivity check or moved to OnAfterRender.");
+        description: "JS interop in initialization and parameter lifecycle methods should be guarded by a recognized interactivity check such as RendererInfo.IsInteractive or AssignedRenderMode being non-null, or moved to OnAfterRender.");
 
     public static readonly DiagnosticDescriptor AsyncVoidMethod = new(
         id: "NTBA0007",

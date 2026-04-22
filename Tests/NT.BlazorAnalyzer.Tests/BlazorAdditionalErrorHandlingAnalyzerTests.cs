@@ -516,6 +516,161 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
     }
 
     [Fact]
+    public async Task JsInteropInEarlyLifecycleWithHelperInteractivityGuard_DoesNotReportNtba0006()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "HelperGuardedJsLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private global::Microsoft.JSInterop.IJSRuntime JS => default!;
+                    private RenderInfo RendererInfo { get; } = new RenderInfo();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        if (IsInteractiveRender())
+                        {
+                            try
+                            {
+                                await JS.InvokeVoidAsync("doSomething");
+                            }
+                            catch (global::System.Exception)
+                            {
+                                throw;
+                            }
+                        }
+                    }
+
+                    private bool IsInteractiveRender() => RendererInfo.IsInteractive;
+
+                    private sealed class RenderInfo
+                    {
+                        public bool IsInteractive { get; } = true;
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0006");
+    }
+
+    [Fact]
+    public async Task JsInteropInEarlyLifecycleWithAssignedRenderModeGuard_DoesNotReportNtba0006()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "AssignedRenderModeGuardedComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private global::Microsoft.JSInterop.IJSRuntime JS => default!;
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        if (AssignedRenderMode is not null)
+                        {
+                            try
+                            {
+                                await JS.InvokeVoidAsync("doSomething");
+                            }
+                            catch (global::System.Exception)
+                            {
+                                throw;
+                            }
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0006");
+    }
+
+    [Fact]
+    public async Task GuardedHelperInvocationInEarlyLifecycle_DoesNotReportNtba0006()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "GuardedHelperInvocationComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private global::Microsoft.JSInterop.IJSRuntime JS => default!;
+                    private RenderInfo RendererInfo { get; } = new RenderInfo();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        if (RendererInfo.IsInteractive)
+                        {
+                            await LoadClientStateAsync();
+                        }
+                    }
+
+                    private async global::System.Threading.Tasks.Task LoadClientStateAsync()
+                    {
+                        try
+                        {
+                            await JS.InvokeVoidAsync("doSomething");
+                        }
+                        catch (global::System.Exception)
+                        {
+                            throw;
+                        }
+                    }
+
+                    private sealed class RenderInfo
+                    {
+                        public bool IsInteractive { get; } = true;
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0006");
+    }
+
+    [Fact]
+    public async Task JsInteropInEarlyLifecycleWithInteractivityGuardClause_DoesNotReportNtba0006()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "GuardClauseJsLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private global::Microsoft.JSInterop.IJSRuntime JS => default!;
+                    private RenderInfo RendererInfo { get; } = new RenderInfo();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        if (!RendererInfo.IsInteractive)
+                        {
+                            return;
+                        }
+
+                        try
+                        {
+                            await JS.InvokeVoidAsync("doSomething");
+                        }
+                        catch (global::System.Exception)
+                        {
+                            throw;
+                        }
+                    }
+
+                    private sealed class RenderInfo
+                    {
+                        public bool IsInteractive { get; } = true;
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0006");
+    }
+
+    [Fact]
     public async Task AsyncVoidMethod_ReportsNtba0007()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(

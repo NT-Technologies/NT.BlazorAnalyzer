@@ -94,9 +94,15 @@ Notes:
 
 ### `NTBA0006`
 
-Warning when JS interop is performed in early lifecycle methods before `OnAfterRender{Async}` without an interactivity guard.
+Warning when JS interop is performed in early lifecycle methods before `OnAfterRender{Async}` without a recognized interactivity check.
 
-This warning is suppressed when the JS interop call is inside an `if` statement that checks for interactivity, for example `if (RendererInfo.IsInteractive)`.
+Notes:
+- the rule is path-aware for early lifecycle methods: `OnInitialized{Async}`, `OnParametersSet{Async}`, and `SetParametersAsync`
+- direct checks such as `if (RendererInfo.IsInteractive)` and `if (AssignedRenderMode is not null)` suppress the warning
+- helper wrappers that delegate to those checks are accepted
+- interactivity guard-clause patterns such as `if (!RendererInfo.IsInteractive) return;` are accepted
+- guarded helper calls do not warn when the helper performs the JS interop and is only reached through the recognized guard
+- unrelated boolean conditions do not suppress the warning
 
 ### `NTBA0007`
 
@@ -419,6 +425,40 @@ Why:
         if (RendererInfo.IsInteractive)
         {
             await JS.InvokeVoidAsync("doSomething");
+        }
+    }
+}
+```
+
+### Does not emit `NTBA0006` when a helper or guard clause proves interactivity
+
+```razor
+@rendermode InteractiveServer
+
+@code {
+    [Inject] private IJSRuntime JS { get; set; } = default!;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!IsInteractiveRender())
+        {
+            return;
+        }
+
+        await LoadClientStateAsync();
+    }
+
+    private bool IsInteractiveRender() => RendererInfo.IsInteractive;
+
+    private async Task LoadClientStateAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("doSomething");
+        }
+        catch (Exception)
+        {
+            throw;
         }
     }
 }

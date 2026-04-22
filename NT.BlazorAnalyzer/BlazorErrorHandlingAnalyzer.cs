@@ -114,6 +114,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                         componentSymbol,
                         localMethodAnalyses);
 
+                    ReportLocalLifecycleJsInteropGuardDiagnostics(
+                        symbolEndContext,
+                        componentSymbol,
+                        localMethodAnalyses);
+
                     ReportLocalDisposeTryCatchDiagnostics(
                         symbolEndContext,
                         componentSymbol,
@@ -389,15 +394,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 containingType.Name));
         }
 
-        if (analysis.HasUnsafeLifecycleJsInterop)
-        {
-            context.ReportDiagnostic(Diagnostic.Create(
-                DiagnosticDescriptors.JsInteropRequiresInteractivityGuard,
-                methodLocation,
-                methodSymbol.Name,
-                containingType.Name));
-        }
-
         if (analysis.IsAsyncVoid)
         {
             context.ReportDiagnostic(Diagnostic.Create(
@@ -566,6 +562,34 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
             context.ReportDiagnostic(Diagnostic.Create(
                 DiagnosticDescriptors.DisposeMissingTryCatch,
+                methodLocation,
+                method.Name,
+                componentSymbol.Name));
+        }
+    }
+
+    private static void ReportLocalLifecycleJsInteropGuardDiagnostics(
+        SymbolAnalysisContext context,
+        INamedTypeSymbol componentSymbol,
+        ConcurrentDictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses)
+    {
+        foreach (var method in localMethodAnalyses.Keys
+                     .Distinct<IMethodSymbol>(SymbolEqualityComparer.Default)
+                     .OrderBy(static method => method.GetPreferredSourceLocation().TryGetStartLine() ?? int.MaxValue))
+        {
+            if (!ShouldReportLifecycleJsInteropGuard(method, localMethodAnalyses))
+            {
+                continue;
+            }
+
+            var methodLocation = method.GetPreferredSourceLocation();
+            if (methodLocation is null)
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(
+                DiagnosticDescriptors.JsInteropRequiresInteractivityGuard,
                 methodLocation,
                 method.Name,
                 componentSymbol.Name));
@@ -1446,6 +1470,21 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             callees.Add(callee);
         }
 
+        var unguardedJsInteropCallees = ImmutableHashSet.CreateBuilder<IMethodSymbol>(SymbolEqualityComparer.Default);
+        foreach (var invocation in GetLocalMemberInvocations(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken))
+        {
+            if (IsWithinInteractivityGuard(invocation, semanticModel, methodSymbol.ContainingType, cancellationToken))
+            {
+                continue;
+            }
+
+            var callee = GetInvokedMemberMethod(invocation, semanticModel, methodSymbol.ContainingType, cancellationToken);
+            if (callee is not null)
+            {
+                unguardedJsInteropCallees.Add(callee);
+            }
+        }
+
         var jsInteropCalls = GetJsInteropInvocations(methodDeclaration, semanticModel, cancellationToken).ToArray();
         var unhandledJsInteropCalls = GetUnhandledJsInteropInvocations(
             methodDeclaration,
@@ -1463,7 +1502,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             hasFailureProneOperation: HasFailureProneOperation(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken),
             hasJsInteropCalls: jsInteropCalls.Length > 0,
             hasUnhandledJsInteropCalls: unhandledJsInteropCalls.Length > 0,
-            hasUnsafeLifecycleJsInterop: IsPreRenderLifecycleMethod(methodSymbol) && jsInteropCalls.Any(call => !IsWithinInteractivityGuard(call)),
+            hasUnguardedJsInteropCalls: jsInteropCalls.Any(call => !IsWithinInteractivityGuard(call, semanticModel, methodSymbol.ContainingType, cancellationToken)),
+            unguardedJsInteropCallees: unguardedJsInteropCallees.ToImmutable(),
             isAsyncVoid: IsAsyncVoid(methodDeclaration, methodSymbol),
             catchWithoutLoggingLocations: GetCatchWithoutLoggingLocations(methodDeclaration, semanticModel, cancellationToken));
     }
@@ -1577,6 +1617,20 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         return !HasMeaningfulDisposeHandling(method, methodAnalyses);
+    }
+
+    private static bool ShouldReportLifecycleJsInteropGuard(
+        IMethodSymbol method,
+        IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
+    {
+        if (!methodAnalyses.TryGetValue(method, out var analysis) ||
+            !analysis.IsLifecycleMethod ||
+            !IsPreRenderLifecycleMethod(method))
+        {
+            return false;
+        }
+
+        return HasUnguardedJsInteropPath(method, methodAnalyses);
     }
 
     private static bool HasMeaningfulLifecycleHandling(
@@ -1785,6 +1839,66 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             "OnAfterRender" or "OnAfterRenderAsync" => "after-render",
             _ => "early"
         };
+
+    private static bool HasUnguardedJsInteropPath(
+        IMethodSymbol method,
+        IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
+    {
+        var unguardedJsCache = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
+        var visitingUnguardedJs = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+
+        return HasUnguardedJsInteropPathCore(method);
+
+        bool HasUnguardedJsInteropPathCore(IMethodSymbol currentMethod)
+        {
+            if (unguardedJsCache.TryGetValue(currentMethod, out var cached))
+            {
+                return cached;
+            }
+
+            if (!methodAnalyses.TryGetValue(currentMethod, out var analysis))
+            {
+                return false;
+            }
+
+            if (analysis.HasUnguardedJsInteropCalls)
+            {
+                unguardedJsCache[currentMethod] = true;
+                return true;
+            }
+
+            if (!visitingUnguardedJs.Add(currentMethod))
+            {
+                unguardedJsCache[currentMethod] = false;
+                return false;
+            }
+
+            try
+            {
+                foreach (var callee in analysis.UnguardedJsInteropCallees)
+                {
+                    if (HasUnguardedJsInteropPathCore(callee))
+                    {
+                        unguardedJsCache[currentMethod] = true;
+                        return true;
+                    }
+                }
+
+                if (analysis.DelegatedMethod is not null && HasUnguardedJsInteropPathCore(analysis.DelegatedMethod))
+                {
+                    unguardedJsCache[currentMethod] = true;
+                    return true;
+                }
+
+                unguardedJsCache[currentMethod] = false;
+                return false;
+            }
+            finally
+            {
+                visitingUnguardedJs.Remove(currentMethod);
+            }
+        }
+    }
 
     private static RenderTreeAnalysis AnalyzeBuildRenderTree(
         BlockSyntax body,
@@ -2605,14 +2719,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         INamedTypeSymbol containingType,
         CancellationToken cancellationToken)
     {
-        var rootNode = GetMethodExecutableRoot(methodDeclaration);
-        if (rootNode is null)
-        {
-            yield break;
-        }
-
         var seen = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
-        foreach (var invocation in rootNode.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node)).OfType<InvocationExpressionSyntax>())
+        foreach (var invocation in GetLocalMemberInvocations(methodDeclaration, semanticModel, containingType, cancellationToken))
         {
             var methodSymbol = GetInvokedMemberMethod(invocation, semanticModel, containingType, cancellationToken);
             if (methodSymbol is null || !seen.Add(methodSymbol))
@@ -2621,6 +2729,27 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             }
 
             yield return methodSymbol;
+        }
+    }
+
+    private static IEnumerable<InvocationExpressionSyntax> GetLocalMemberInvocations(
+        MethodDeclarationSyntax methodDeclaration,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken)
+    {
+        var rootNode = GetMethodExecutableRoot(methodDeclaration);
+        if (rootNode is null)
+        {
+            yield break;
+        }
+
+        foreach (var invocation in rootNode.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node)).OfType<InvocationExpressionSyntax>())
+        {
+            if (GetInvokedMemberMethod(invocation, semanticModel, containingType, cancellationToken) is not null)
+            {
+                yield return invocation;
+            }
         }
     }
 
@@ -2903,16 +3032,61 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
     }
 
-    private static bool IsWithinInteractivityGuard(SyntaxNode node)
+    private static bool IsWithinInteractivityGuard(
+        SyntaxNode node,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken)
     {
-        for (var current = node.Parent; current is not null; current = current.Parent)
+        for (SyntaxNode? current = node, previous = node; current is not null; previous = current, current = current.Parent)
         {
             if (current is MethodDeclarationSyntax)
             {
                 return false;
             }
 
-            if (current is IfStatementSyntax ifStatement && HasInteractivityGuard(ifStatement.Condition))
+            if (current is BlockSyntax block &&
+                previous is StatementSyntax statement &&
+                HasGuardClauseBefore(block, statement, semanticModel, containingType, cancellationToken))
+            {
+                return true;
+            }
+
+            if (current is IfStatementSyntax ifStatement)
+            {
+                if (IsNodeInsideStatement(previous, ifStatement.Statement) &&
+                    ConditionGuaranteesInteractivity(ifStatement.Condition, whenTrue: true, semanticModel, containingType, cancellationToken))
+                {
+                    return true;
+                }
+
+                if (ifStatement.Else is { } elseClause &&
+                    IsNodeInsideStatement(previous, elseClause.Statement) &&
+                    ConditionGuaranteesInteractivity(ifStatement.Condition, whenTrue: false, semanticModel, containingType, cancellationToken))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasGuardClauseBefore(
+        BlockSyntax block,
+        StatementSyntax statement,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken)
+    {
+        foreach (var precedingStatement in block.Statements)
+        {
+            if (ReferenceEquals(precedingStatement, statement))
+            {
+                break;
+            }
+
+            if (IsInteractivityGuardClause(precedingStatement, semanticModel, containingType, cancellationToken))
             {
                 return true;
             }
@@ -2921,19 +3095,353 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static bool HasInteractivityGuard(ExpressionSyntax condition)
+    private static bool IsInteractivityGuardClause(
+        StatementSyntax statement,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken)
     {
-        foreach (var token in condition.DescendantTokens())
+        if (statement is not IfStatementSyntax { Else: null } ifStatement ||
+            !StatementDefinitelyExits(ifStatement.Statement))
         {
-            var text = token.ValueText;
-            if (text.IndexOf("Interactive", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                string.Equals(text, "AssignedRenderMode", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(text, "IsConnected", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
+            return false;
         }
 
+        return ConditionGuaranteesInteractivity(ifStatement.Condition, whenTrue: false, semanticModel, containingType, cancellationToken);
+    }
+
+    private static bool StatementDefinitelyExits(StatementSyntax statement) =>
+        statement switch
+        {
+            ReturnStatementSyntax => true,
+            ThrowStatementSyntax => true,
+            BlockSyntax block when block.Statements.Count > 0 => StatementDefinitelyExits(block.Statements[block.Statements.Count - 1]),
+            _ => false
+        };
+
+    private static bool IsNodeInsideStatement(SyntaxNode node, StatementSyntax statement) =>
+        statement.FullSpan.Contains(node.Span);
+
+    private static bool ConditionGuaranteesInteractivity(
+        ExpressionSyntax expression,
+        bool whenTrue,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken)
+    {
+        return ConditionGuaranteesInteractivity(
+            expression,
+            whenTrue,
+            semanticModel,
+            containingType,
+            cancellationToken,
+            new HashSet<ISymbol>(SymbolEqualityComparer.Default));
+    }
+
+    private static bool ConditionGuaranteesInteractivity(
+        ExpressionSyntax expression,
+        bool whenTrue,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken,
+        HashSet<ISymbol> visitedSymbols)
+    {
+        expression = StripParentheses(expression);
+
+        if (TryEvaluateRecognizedInteractivityValue(expression, whenTrue, semanticModel, containingType, cancellationToken, visitedSymbols, out var directResult))
+        {
+            return directResult;
+        }
+
+        switch (expression)
+        {
+            case PrefixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.LogicalNotExpression, Operand: var operand }:
+                return ConditionGuaranteesInteractivity(operand, !whenTrue, semanticModel, containingType, cancellationToken, visitedSymbols);
+
+            case BinaryExpressionSyntax binaryExpression when binaryExpression.IsKind(SyntaxKind.LogicalAndExpression):
+                if (whenTrue)
+                {
+                    return ConditionGuaranteesInteractivity(binaryExpression.Left, whenTrue: true, semanticModel, containingType, cancellationToken, visitedSymbols) ||
+                           ConditionGuaranteesInteractivity(binaryExpression.Right, whenTrue: true, semanticModel, containingType, cancellationToken, visitedSymbols);
+                }
+
+                return false;
+
+            case BinaryExpressionSyntax binaryExpression when binaryExpression.IsKind(SyntaxKind.LogicalOrExpression):
+                if (whenTrue)
+                {
+                    return ConditionGuaranteesInteractivity(binaryExpression.Left, whenTrue: true, semanticModel, containingType, cancellationToken, visitedSymbols) &&
+                           ConditionGuaranteesInteractivity(binaryExpression.Right, whenTrue: true, semanticModel, containingType, cancellationToken, visitedSymbols);
+                }
+
+                return ConditionGuaranteesInteractivity(binaryExpression.Left, whenTrue: false, semanticModel, containingType, cancellationToken, visitedSymbols) ||
+                       ConditionGuaranteesInteractivity(binaryExpression.Right, whenTrue: false, semanticModel, containingType, cancellationToken, visitedSymbols);
+
+            case BinaryExpressionSyntax binaryExpression:
+                return TryEvaluateBooleanComparison(binaryExpression, whenTrue, semanticModel, containingType, cancellationToken, visitedSymbols, out var comparisonResult) &&
+                       comparisonResult;
+
+            case IsPatternExpressionSyntax isPatternExpression:
+                return TryEvaluatePatternInteractivity(isPatternExpression, whenTrue, semanticModel, containingType, cancellationToken, visitedSymbols, out var patternResult) &&
+                       patternResult;
+
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryEvaluateBooleanComparison(
+        BinaryExpressionSyntax expression,
+        bool whenTrue,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken,
+        HashSet<ISymbol> visitedSymbols,
+        out bool result)
+    {
+        result = false;
+        var left = StripParentheses(expression.Left);
+        var right = StripParentheses(expression.Right);
+
+        if (TryGetBooleanLiteralValue(left, out var leftLiteral))
+        {
+            return TryEvaluateBooleanLiteralComparison(
+                right,
+                leftLiteral,
+                expression.Kind(),
+                whenTrue,
+                semanticModel,
+                containingType,
+                cancellationToken,
+                visitedSymbols,
+                out result);
+        }
+
+        if (TryGetBooleanLiteralValue(right, out var rightLiteral))
+        {
+            return TryEvaluateBooleanLiteralComparison(
+                left,
+                rightLiteral,
+                expression.Kind(),
+                whenTrue,
+                semanticModel,
+                containingType,
+                cancellationToken,
+                visitedSymbols,
+                out result);
+        }
+
+        if (TryGetNullLiteralSide(left, right, out var candidateExpression) ||
+            TryGetNullLiteralSide(right, left, out candidateExpression))
+        {
+            if (!IsAssignedRenderModeReference(candidateExpression, semanticModel, containingType, cancellationToken))
+            {
+                return false;
+            }
+
+            result = expression.Kind() switch
+            {
+                SyntaxKind.NotEqualsExpression => whenTrue,
+                SyntaxKind.EqualsExpression => !whenTrue,
+                _ => false
+            };
+            return expression.IsKind(SyntaxKind.NotEqualsExpression) || expression.IsKind(SyntaxKind.EqualsExpression);
+        }
+
+        return false;
+    }
+
+    private static bool TryEvaluateBooleanLiteralComparison(
+        ExpressionSyntax expression,
+        bool literalValue,
+        SyntaxKind comparisonKind,
+        bool whenTrue,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken,
+        HashSet<ISymbol> visitedSymbols,
+        out bool result)
+    {
+        result = false;
+        if (!TryEvaluateRecognizedInteractivityValue(expression, whenTrue: literalValue, semanticModel, containingType, cancellationToken, visitedSymbols, out var baseValue))
+        {
+            return false;
+        }
+
+        result = comparisonKind switch
+        {
+            SyntaxKind.EqualsExpression => whenTrue ? baseValue : !baseValue,
+            SyntaxKind.NotEqualsExpression => whenTrue ? !baseValue : baseValue,
+            _ => false
+        };
+        return comparisonKind is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression;
+    }
+
+    private static bool TryEvaluatePatternInteractivity(
+        IsPatternExpressionSyntax expression,
+        bool whenTrue,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken,
+        HashSet<ISymbol> visitedSymbols,
+        out bool result)
+    {
+        result = false;
+        if (!IsAssignedRenderModeReference(expression.Expression, semanticModel, containingType, cancellationToken))
+        {
+            return false;
+        }
+
+        switch (expression.Pattern)
+        {
+            case UnaryPatternSyntax { Pattern: ConstantPatternSyntax { Expression: LiteralExpressionSyntax literal } } unaryPattern
+                when literal.IsKind(SyntaxKind.NullLiteralExpression) && unaryPattern.IsKind(SyntaxKind.NotPattern):
+                result = whenTrue;
+                return true;
+
+            case ConstantPatternSyntax { Expression: LiteralExpressionSyntax literal }
+                when literal.IsKind(SyntaxKind.NullLiteralExpression):
+                result = !whenTrue;
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryEvaluateRecognizedInteractivityValue(
+        ExpressionSyntax expression,
+        bool whenTrue,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken,
+        HashSet<ISymbol> visitedSymbols,
+        out bool result)
+    {
+        result = false;
+        expression = StripParentheses(expression);
+
+        if (IsRendererInfoIsInteractiveReference(expression, semanticModel, cancellationToken))
+        {
+            result = whenTrue;
+            return true;
+        }
+
+        if (TryGetSymbol(expression, semanticModel, cancellationToken) is not ISymbol symbol ||
+            !visitedSymbols.Add(symbol))
+        {
+            return false;
+        }
+
+        try
+        {
+            switch (symbol)
+            {
+                case IMethodSymbol methodSymbol when methodSymbol.Parameters.Length == 0 &&
+                                                    methodSymbol.ReturnType.SpecialType == SpecialType.System_Boolean &&
+                                                    IsRelevantMethod(NormalizeMethodSymbol(methodSymbol), containingType):
+                    if (TryGetSingleReturnedExpression(methodSymbol, cancellationToken) is { } methodExpression)
+                    {
+                        result = ConditionGuaranteesInteractivity(methodExpression, whenTrue, semanticModel, containingType, cancellationToken, visitedSymbols);
+                        return true;
+                    }
+
+                    break;
+
+                case IPropertySymbol propertySymbol when propertySymbol.Type.SpecialType == SpecialType.System_Boolean &&
+                                                       SymbolEqualityComparer.Default.Equals(propertySymbol.ContainingType, containingType):
+                    if (TryGetPropertyValueExpression(propertySymbol, cancellationToken) is { } propertyExpression)
+                    {
+                        result = ConditionGuaranteesInteractivity(propertyExpression, whenTrue, semanticModel, containingType, cancellationToken, visitedSymbols);
+                        return true;
+                    }
+
+                    break;
+            }
+        }
+        finally
+        {
+            visitedSymbols.Remove(symbol);
+        }
+
+        return false;
+    }
+
+    private static bool IsRendererInfoIsInteractiveReference(
+        ExpressionSyntax expression,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        expression = StripParentheses(expression);
+
+        if (expression is not MemberAccessExpressionSyntax memberAccess ||
+            memberAccess.Name.Identifier.ValueText != "IsInteractive")
+        {
+            return false;
+        }
+
+        if (TryGetSymbol(memberAccess.Name, semanticModel, cancellationToken) is not IPropertySymbol propertySymbol ||
+            propertySymbol.Type.SpecialType != SpecialType.System_Boolean)
+        {
+            return false;
+        }
+
+        if (TryGetSymbol(memberAccess.Expression, semanticModel, cancellationToken) is { Name: "RendererInfo" })
+        {
+            return true;
+        }
+
+        var receiverType = GetValueExpressionType(memberAccess.Expression, semanticModel, cancellationToken);
+        return receiverType?.Name == "RendererInfo";
+    }
+
+    private static bool IsAssignedRenderModeReference(
+        ExpressionSyntax expression,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken)
+    {
+        expression = StripParentheses(expression);
+        if (TryGetSymbol(expression, semanticModel, cancellationToken) is not IPropertySymbol propertySymbol ||
+            propertySymbol.Name != "AssignedRenderMode")
+        {
+            return false;
+        }
+
+        return SymbolEqualityComparer.Default.Equals(propertySymbol.ContainingType, containingType) ||
+               propertySymbol.ContainingType.InheritsFromOrEquals(containingType) ||
+               containingType.InheritsFromOrEquals(propertySymbol.ContainingType);
+    }
+
+    private static bool TryGetBooleanLiteralValue(ExpressionSyntax expression, out bool value)
+    {
+        expression = StripParentheses(expression);
+        if (expression.IsKind(SyntaxKind.TrueLiteralExpression))
+        {
+            value = true;
+            return true;
+        }
+
+        if (expression.IsKind(SyntaxKind.FalseLiteralExpression))
+        {
+            value = false;
+            return true;
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static bool TryGetNullLiteralSide(ExpressionSyntax left, ExpressionSyntax right, out ExpressionSyntax candidateExpression)
+    {
+        left = StripParentheses(left);
+        if (left.IsKind(SyntaxKind.NullLiteralExpression))
+        {
+            candidateExpression = right;
+            return true;
+        }
+
+        candidateExpression = null!;
         return false;
     }
 
@@ -3046,6 +3554,77 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         return GetTypeMetadataNames(methodSymbol.ContainingType).Any(static metadataName =>
             metadataName is "Microsoft.Extensions.Logging.ILogger" or "Microsoft.Extensions.Logging.LoggerExtensions");
+    }
+
+    private static ExpressionSyntax? TryGetSingleReturnedExpression(
+        IMethodSymbol methodSymbol,
+        CancellationToken cancellationToken)
+    {
+        foreach (var syntaxReference in methodSymbol.DeclaringSyntaxReferences)
+        {
+            if (syntaxReference.GetSyntax(cancellationToken) is not MethodDeclarationSyntax methodDeclaration)
+            {
+                continue;
+            }
+
+            if (methodDeclaration.ExpressionBody is { Expression: { } expressionBody })
+            {
+                return expressionBody;
+            }
+
+            if (methodDeclaration.Body?.Statements.Count == 1 &&
+                methodDeclaration.Body.Statements[0] is ReturnStatementSyntax { Expression: { } returnExpression })
+            {
+                return returnExpression;
+            }
+        }
+
+        return null;
+    }
+
+    private static ExpressionSyntax? TryGetPropertyValueExpression(
+        IPropertySymbol propertySymbol,
+        CancellationToken cancellationToken)
+    {
+        foreach (var syntaxReference in propertySymbol.DeclaringSyntaxReferences)
+        {
+            if (syntaxReference.GetSyntax(cancellationToken) is not PropertyDeclarationSyntax propertyDeclaration)
+            {
+                continue;
+            }
+
+            if (propertyDeclaration.ExpressionBody is { Expression: { } expressionBody })
+            {
+                return expressionBody;
+            }
+
+            if (propertyDeclaration.AccessorList?.Accessors
+                    .FirstOrDefault(static accessor => accessor.IsKind(SyntaxKind.GetAccessorDeclaration)) is { } getterAccessor)
+            {
+                if (getterAccessor.ExpressionBody is { Expression: { } getterExpressionBody })
+                {
+                    return getterExpressionBody;
+                }
+
+                if (getterAccessor.Body?.Statements.Count == 1 &&
+                    getterAccessor.Body.Statements[0] is ReturnStatementSyntax { Expression: { } returnExpression })
+                {
+                    return returnExpression;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static ExpressionSyntax StripParentheses(ExpressionSyntax expression)
+    {
+        while (expression is ParenthesizedExpressionSyntax parenthesizedExpression)
+        {
+            expression = parenthesizedExpression.Expression;
+        }
+
+        return expression;
     }
 
     private static SyntaxNode? GetMethodExecutableRoot(MethodDeclarationSyntax methodDeclaration) =>
@@ -3569,7 +4148,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             bool hasFailureProneOperation,
             bool hasJsInteropCalls,
             bool hasUnhandledJsInteropCalls,
-            bool hasUnsafeLifecycleJsInterop,
+            bool hasUnguardedJsInteropCalls,
+            ImmutableHashSet<IMethodSymbol> unguardedJsInteropCallees,
             bool isAsyncVoid,
             ImmutableArray<Location> catchWithoutLoggingLocations)
         {
@@ -3582,7 +4162,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             HasFailureProneOperation = hasFailureProneOperation;
             HasJsInteropCalls = hasJsInteropCalls;
             HasUnhandledJsInteropCalls = hasUnhandledJsInteropCalls;
-            HasUnsafeLifecycleJsInterop = hasUnsafeLifecycleJsInterop;
+            HasUnguardedJsInteropCalls = hasUnguardedJsInteropCalls;
+            UnguardedJsInteropCallees = unguardedJsInteropCallees;
             IsAsyncVoid = isAsyncVoid;
             CatchWithoutLoggingLocations = catchWithoutLoggingLocations;
         }
@@ -3605,7 +4186,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         public bool HasUnhandledJsInteropCalls { get; }
 
-        public bool HasUnsafeLifecycleJsInterop { get; }
+        public bool HasUnguardedJsInteropCalls { get; }
+
+        public ImmutableHashSet<IMethodSymbol> UnguardedJsInteropCallees { get; }
 
         public bool IsAsyncVoid { get; }
 
