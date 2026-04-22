@@ -380,7 +380,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        if (analysis.HasJsInteropCalls && !analysis.HasTryCatch)
+        if (analysis.HasUnhandledJsInteropCalls)
         {
             context.ReportDiagnostic(Diagnostic.Create(
                 DiagnosticDescriptors.JsInteropMissingTryCatch,
@@ -1447,6 +1447,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         var jsInteropCalls = GetJsInteropInvocations(methodDeclaration, semanticModel, cancellationToken).ToArray();
+        var unhandledJsInteropCalls = GetUnhandledJsInteropInvocations(
+            methodDeclaration,
+            semanticModel,
+            methodSymbol,
+            cancellationToken);
 
         return new MethodAnalysis(
             hasTryCatch: MethodContainsTryCatch(methodDeclaration),
@@ -1457,6 +1462,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             hasOperationalCode: HasOperationalCode(methodDeclaration),
             hasFailureProneOperation: HasFailureProneOperation(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken),
             hasJsInteropCalls: jsInteropCalls.Length > 0,
+            hasUnhandledJsInteropCalls: unhandledJsInteropCalls.Length > 0,
             hasUnsafeLifecycleJsInterop: IsPreRenderLifecycleMethod(methodSymbol) && jsInteropCalls.Any(call => !IsWithinInteractivityGuard(call)),
             isAsyncVoid: IsAsyncVoid(methodDeclaration, methodSymbol),
             catchWithoutLoggingLocations: GetCatchWithoutLoggingLocations(methodDeclaration, semanticModel, cancellationToken));
@@ -1478,7 +1484,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static bool HasSpecificTryCatchDiagnostic(MethodAnalysis analysis) =>
         ((!analysis.HasTryCatch && analysis.IsLifecycleMethod && analysis.HasFailureProneOperation) ||
          (!analysis.HasTryCatch && analysis.IsDisposeMethod && analysis.HasFailureProneOperation) ||
-         analysis.HasJsInteropCalls);
+         analysis.HasUnhandledJsInteropCalls);
 
     private static bool HasOperationalCode(MethodDeclarationSyntax methodDeclaration)
     {
@@ -2709,8 +2715,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         foreach (var invocation in rootNode.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node)).OfType<InvocationExpressionSyntax>())
         {
-            if (invocation.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: var memberName } &&
-                memberName is "InvokeAsync" or "InvokeVoidAsync" or "DisposeAsync")
+            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+                IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken))
             {
                 yield return invocation;
                 continue;
@@ -2722,6 +2728,126 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 yield return invocation;
             }
         }
+    }
+
+    private static bool IsKnownJsInteropInvocation(
+        MemberAccessExpressionSyntax memberAccess,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        var memberName = memberAccess.Name.Identifier.ValueText;
+        if (memberName is not ("InvokeAsync" or "InvokeVoidAsync" or "DisposeAsync"))
+        {
+            return false;
+        }
+
+        var receiverType = GetValueExpressionType(memberAccess.Expression, semanticModel, cancellationToken) as INamedTypeSymbol;
+        if (receiverType is null)
+        {
+            return false;
+        }
+
+        var metadataNames = GetTypeMetadataNames(receiverType).ToArray();
+        return memberName switch
+        {
+            "InvokeAsync" or "InvokeVoidAsync" => metadataNames.Any(static name =>
+                name is "Microsoft.JSInterop.IJSRuntime" or
+                    "Microsoft.JSInterop.IJSInProcessRuntime" or
+                    "Microsoft.JSInterop.IJSUnmarshalledRuntime" or
+                    "Microsoft.JSInterop.IJSObjectReference" or
+                    "Microsoft.JSInterop.IJSInProcessObjectReference"),
+            "DisposeAsync" => metadataNames.Any(static name =>
+                name is "Microsoft.JSInterop.IJSObjectReference" or
+                    "Microsoft.JSInterop.IJSInProcessObjectReference"),
+            _ => false
+        };
+    }
+
+    private static ImmutableArray<InvocationExpressionSyntax> GetUnhandledJsInteropInvocations(
+        MethodDeclarationSyntax methodDeclaration,
+        SemanticModel semanticModel,
+        IMethodSymbol methodSymbol,
+        CancellationToken cancellationToken)
+    {
+        var builder = ImmutableArray.CreateBuilder<InvocationExpressionSyntax>();
+        foreach (var invocation in GetJsInteropInvocations(methodDeclaration, semanticModel, cancellationToken))
+        {
+            if (IsJsInteropInvocationMeaningfullyHandled(invocation, semanticModel, methodSymbol, cancellationToken))
+            {
+                continue;
+            }
+
+            builder.Add(invocation);
+        }
+
+        return builder.ToImmutable();
+    }
+
+    private static bool IsJsInteropInvocationMeaningfullyHandled(
+        InvocationExpressionSyntax invocation,
+        SemanticModel semanticModel,
+        IMethodSymbol methodSymbol,
+        CancellationToken cancellationToken)
+    {
+        foreach (var tryStatement in invocation.Ancestors().OfType<TryStatementSyntax>())
+        {
+            if (!tryStatement.Block.FullSpan.Contains(invocation.Span) || tryStatement.Catches.Count == 0)
+            {
+                continue;
+            }
+
+            if (tryStatement.Catches.Any(catchClause => CatchClauseLogsOrRethrows(catchClause, semanticModel, cancellationToken)))
+            {
+                return true;
+            }
+
+            if (IsExpectedJsDisconnectedCleanupCatch(tryStatement, invocation, semanticModel, methodSymbol, cancellationToken))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsExpectedJsDisconnectedCleanupCatch(
+        TryStatementSyntax tryStatement,
+        InvocationExpressionSyntax invocation,
+        SemanticModel semanticModel,
+        IMethodSymbol methodSymbol,
+        CancellationToken cancellationToken)
+    {
+        if (!IsDisposeMethod(methodSymbol) ||
+            invocation.Expression is not MemberAccessExpressionSyntax memberAccess ||
+            memberAccess.Name.Identifier.ValueText != "DisposeAsync" ||
+            !IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken))
+        {
+            return false;
+        }
+
+        return IsJsDisconnectedExceptionCatchSet(tryStatement.Catches, semanticModel, cancellationToken);
+    }
+
+    private static bool IsJsDisconnectedExceptionCatchSet(
+        SyntaxList<CatchClauseSyntax> catches,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (catches.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var catchClause in catches)
+        {
+            if (catchClause.Declaration?.Type is not { } catchType ||
+                !IsJsDisconnectedExceptionType(catchType, semanticModel, cancellationToken))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool IsJsInteropMethod(IMethodSymbol methodSymbol)
@@ -2840,6 +2966,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         SemanticModel semanticModel,
         CancellationToken cancellationToken)
     {
+        if (IsExpectedJsDisconnectedCleanupCatch(catchClause, semanticModel, cancellationToken))
+        {
+            return true;
+        }
+
         if (catchClause.Block.DescendantNodesAndSelf().OfType<ThrowStatementSyntax>().Any())
         {
             return true;
@@ -2861,6 +2992,48 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         return false;
+    }
+
+    private static bool IsExpectedJsDisconnectedCleanupCatch(
+        CatchClauseSyntax catchClause,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (catchClause.Declaration?.Type is null ||
+            !IsJsDisconnectedExceptionType(catchClause.Declaration.Type, semanticModel, cancellationToken))
+        {
+            return false;
+        }
+
+        if (catchClause.Ancestors().OfType<TryStatementSyntax>().FirstOrDefault() is not { } tryStatement ||
+            catchClause.FirstAncestorOrSelf<MethodDeclarationSyntax>() is not { } methodDeclaration ||
+            TryGetDeclaredMethodSymbol(methodDeclaration, semanticModel, cancellationToken) is not IMethodSymbol methodSymbol ||
+            !IsDisposeMethod(NormalizeMethodSymbol(methodSymbol)))
+        {
+            return false;
+        }
+
+        return tryStatement.Block.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node))
+            .OfType<InvocationExpressionSyntax>()
+            .Any(invocation =>
+                invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+                memberAccess.Name.Identifier.ValueText == "DisposeAsync" &&
+                IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken));
+    }
+
+    private static bool IsJsDisconnectedExceptionType(
+        TypeSyntax typeSyntax,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (TryGetSymbol(typeSyntax, semanticModel, cancellationToken) is INamedTypeSymbol exceptionType &&
+            GetTypeMetadataNames(exceptionType).Any(static name => name == "Microsoft.JSInterop.JSDisconnectedException"))
+        {
+            return true;
+        }
+
+        var typeName = typeSyntax.ToString();
+        return typeName.EndsWith("JSDisconnectedException", StringComparison.Ordinal);
     }
 
     private static bool IsLoggingOrTelemetryMethod(IMethodSymbol methodSymbol)
@@ -3395,6 +3568,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             bool hasOperationalCode,
             bool hasFailureProneOperation,
             bool hasJsInteropCalls,
+            bool hasUnhandledJsInteropCalls,
             bool hasUnsafeLifecycleJsInterop,
             bool isAsyncVoid,
             ImmutableArray<Location> catchWithoutLoggingLocations)
@@ -3407,6 +3581,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             HasOperationalCode = hasOperationalCode;
             HasFailureProneOperation = hasFailureProneOperation;
             HasJsInteropCalls = hasJsInteropCalls;
+            HasUnhandledJsInteropCalls = hasUnhandledJsInteropCalls;
             HasUnsafeLifecycleJsInterop = hasUnsafeLifecycleJsInterop;
             IsAsyncVoid = isAsyncVoid;
             CatchWithoutLoggingLocations = catchWithoutLoggingLocations;
@@ -3427,6 +3602,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         public bool HasFailureProneOperation { get; }
 
         public bool HasJsInteropCalls { get; }
+
+        public bool HasUnhandledJsInteropCalls { get; }
 
         public bool HasUnsafeLifecycleJsInterop { get; }
 

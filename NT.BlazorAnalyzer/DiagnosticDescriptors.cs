@@ -46,12 +46,12 @@ internal static class DiagnosticDescriptors
 
     public static readonly DiagnosticDescriptor JsInteropMissingTryCatch = new(
         id: "NTBA0005",
-        title: "JS interop should use try/catch",
-        messageFormat: "Method '{0}' in interactive component '{1}' performs JS interop without try/catch handling",
+        title: "JS interop should use meaningful exception handling",
+        messageFormat: "Method '{0}' in interactive component '{1}' performs JS interop without meaningful exception handling",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "JS interop calls in interactive Blazor components should be wrapped in try/catch so failures are handled intentionally.");
+        description: "JS interop calls in interactive Blazor components should use meaningful exception handling. Logged or rethrown catches are accepted, and DisposeAsync cleanup may intentionally catch JSDisconnectedException.");
 
     public static readonly DiagnosticDescriptor JsInteropRequiresInteractivityGuard = new(
         id: "NTBA0006",

@@ -84,7 +84,13 @@ Notes:
 
 ### `NTBA0005`
 
-Warning when a component method performs JS interop without `try/catch`.
+Warning when a component method performs JS interop without meaningful exception handling.
+
+Notes:
+- a catch that logs or rethrows satisfies the rule
+- a swallowed catch can still trigger `NTBA0005` alongside `NTBA0008`
+- `DisposeAsync` cleanup that catches `JSDisconnectedException` is treated as an allowed Blazor cleanup pattern
+- methods that only delegate to a safe local JS helper do not need their own wrapper
 
 ### `NTBA0006`
 

@@ -283,6 +283,172 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
     }
 
     [Fact]
+    public async Task JsInteropWithSwallowedCatch_StillReportsNtba0005()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "SwallowedJsInteropComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "button");
+                    __builder.AddAttribute(1, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create<global::Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, HandleClick));
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private global::Microsoft.JSInterop.IJSRuntime JS => default!;
+
+                    private async global::System.Threading.Tasks.Task HandleClick()
+                    {
+                        try
+                        {
+                            await JS.InvokeVoidAsync("doSomething");
+                        }
+                        catch (global::System.Exception)
+                        {
+                        }
+                    }
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0005");
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
+    }
+
+    [Fact]
+    public async Task JsInteropWithLoggingCatch_DoesNotReportNtba0005()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "LoggedJsInteropComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "button");
+                    __builder.AddAttribute(1, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create<global::Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, HandleClick));
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private global::Microsoft.JSInterop.IJSRuntime JS => default!;
+                    private Logger Logger { get; } = new Logger();
+
+                    private async global::System.Threading.Tasks.Task HandleClick()
+                    {
+                        try
+                        {
+                            await JS.InvokeVoidAsync("doSomething");
+                        }
+                        catch (global::System.Exception ex)
+                        {
+                            Logger.LogError(ex);
+                        }
+                    }
+
+                    private sealed class Logger
+                    {
+                        public void LogError(global::System.Exception ex)
+                        {
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0005");
+    }
+
+    [Fact]
+    public async Task MethodDelegatingToSafeJsHelper_DoesNotReportNtba0005()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "DelegatedJsInteropComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "button");
+                    __builder.AddAttribute(1, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create<global::Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, HandleClick));
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private global::Microsoft.JSInterop.IJSRuntime JS => default!;
+                    private Logger Logger { get; } = new Logger();
+
+                    private global::System.Threading.Tasks.Task HandleClick() => InvokeJsSafelyAsync();
+
+                    private async global::System.Threading.Tasks.Task InvokeJsSafelyAsync()
+                    {
+                        try
+                        {
+                            await JS.InvokeVoidAsync("doSomething");
+                        }
+                        catch (global::System.Exception ex)
+                        {
+                            Logger.LogError(ex);
+                        }
+                    }
+
+                    private sealed class Logger
+                    {
+                        public void LogError(global::System.Exception ex)
+                        {
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0005");
+    }
+
+    [Fact]
+    public async Task DisposeAsyncCatchingJsDisconnectedException_DoesNotReportNtba0005()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "DisconnectedDisposeComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private global::Microsoft.JSInterop.IJSObjectReference Module => default!;
+
+                    public async global::System.Threading.Tasks.ValueTask DisposeAsync()
+                    {
+                        try
+                        {
+                            await Module.DisposeAsync();
+                        }
+                        catch (global::Microsoft.JSInterop.JSDisconnectedException)
+                        {
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0005");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
+    }
+
+    [Fact]
+    public async Task UnrelatedInvokeVoidAsyncMethod_DoesNotReportNtba0005()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "UnrelatedInvokeComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "button");
+                    __builder.AddAttribute(1, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create<global::Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, HandleClick));
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private Helper LocalHelper { get; } = new Helper();
+
+                    private async global::System.Threading.Tasks.Task HandleClick()
+                    {
+                        await LocalHelper.InvokeVoidAsync("doSomething");
+                    }
+
+                    private sealed class Helper
+                    {
+                        public global::System.Threading.Tasks.Task InvokeVoidAsync(string identifier)
+                            => global::System.Threading.Tasks.Task.CompletedTask;
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0005");
+    }
+
+    [Fact]
     public async Task JsInteropInEarlyLifecycleWithoutGuard_ReportsNtba0006()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
