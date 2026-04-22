@@ -114,6 +114,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                         componentSymbol,
                         localMethodAnalyses);
 
+                    ReportLocalDisposeTryCatchDiagnostics(
+                        symbolEndContext,
+                        componentSymbol,
+                        localMethodAnalyses);
+
                     ReportLocalMissingTryCatchDiagnostics(
                         symbolEndContext,
                         componentSymbol,
@@ -375,15 +380,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        if (analysis.IsDisposeMethod && analysis.HasOperationalCode && !analysis.HasTryCatch)
-        {
-            context.ReportDiagnostic(Diagnostic.Create(
-                DiagnosticDescriptors.DisposeMissingTryCatch,
-                methodLocation,
-                methodSymbol.Name,
-                containingType.Name));
-        }
-
         if (analysis.HasJsInteropCalls && !analysis.HasTryCatch)
         {
             context.ReportDiagnostic(Diagnostic.Create(
@@ -545,6 +541,34 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 method.Name,
                 componentSymbol.Name,
                 GetLifecycleRiskLabel(method)));
+        }
+    }
+
+    private static void ReportLocalDisposeTryCatchDiagnostics(
+        SymbolAnalysisContext context,
+        INamedTypeSymbol componentSymbol,
+        ConcurrentDictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses)
+    {
+        foreach (var method in localMethodAnalyses.Keys
+                     .Distinct<IMethodSymbol>(SymbolEqualityComparer.Default)
+                     .OrderBy(static method => method.GetPreferredSourceLocation().TryGetStartLine() ?? int.MaxValue))
+        {
+            if (!ShouldReportDisposeMissingTryCatch(method, localMethodAnalyses))
+            {
+                continue;
+            }
+
+            var methodLocation = method.GetPreferredSourceLocation();
+            if (methodLocation is null)
+            {
+                continue;
+            }
+
+            context.ReportDiagnostic(Diagnostic.Create(
+                DiagnosticDescriptors.DisposeMissingTryCatch,
+                methodLocation,
+                method.Name,
+                componentSymbol.Name));
         }
     }
 
@@ -1453,7 +1477,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
     private static bool HasSpecificTryCatchDiagnostic(MethodAnalysis analysis) =>
         ((!analysis.HasTryCatch && analysis.IsLifecycleMethod && analysis.HasFailureProneOperation) ||
-         (!analysis.HasTryCatch && analysis.IsDisposeMethod && analysis.HasOperationalCode) ||
+         (!analysis.HasTryCatch && analysis.IsDisposeMethod && analysis.HasFailureProneOperation) ||
          analysis.HasJsInteropCalls);
 
     private static bool HasOperationalCode(MethodDeclarationSyntax methodDeclaration)
@@ -1535,7 +1559,68 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return !HasMeaningfulLifecycleHandling(method, methodAnalyses);
     }
 
+    private static bool ShouldReportDisposeMissingTryCatch(
+        IMethodSymbol method,
+        IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
+    {
+        if (!methodAnalyses.TryGetValue(method, out var analysis) ||
+            !analysis.IsDisposeMethod ||
+            !HasFailurePronePath(method, methodAnalyses))
+        {
+            return false;
+        }
+
+        return !HasMeaningfulDisposeHandling(method, methodAnalyses);
+    }
+
     private static bool HasMeaningfulLifecycleHandling(
+        IMethodSymbol method,
+        IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
+    {
+        var effectiveHandlingCache = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
+        var visitingEffectiveHandling = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+
+        return IsEffectivelyHandled(method);
+
+        bool IsEffectivelyHandled(IMethodSymbol currentMethod)
+        {
+            if (effectiveHandlingCache.TryGetValue(currentMethod, out var cached))
+            {
+                return cached;
+            }
+
+            if (!methodAnalyses.TryGetValue(currentMethod, out var analysis))
+            {
+                return false;
+            }
+
+            if (analysis.HasTryCatch)
+            {
+                var meaningfulHandling = analysis.CatchWithoutLoggingLocations.IsEmpty;
+                effectiveHandlingCache[currentMethod] = meaningfulHandling;
+                return meaningfulHandling;
+            }
+
+            if (analysis.DelegatedMethod is null || !visitingEffectiveHandling.Add(currentMethod))
+            {
+                effectiveHandlingCache[currentMethod] = false;
+                return false;
+            }
+
+            try
+            {
+                var handled = IsEffectivelyHandled(analysis.DelegatedMethod);
+                effectiveHandlingCache[currentMethod] = handled;
+                return handled;
+            }
+            finally
+            {
+                visitingEffectiveHandling.Remove(currentMethod);
+            }
+        }
+    }
+
+    private static bool HasMeaningfulDisposeHandling(
         IMethodSymbol method,
         IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
     {

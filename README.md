@@ -74,7 +74,13 @@ Notes:
 
 ### `NTBA0004`
 
-Warning when `Dispose` or `DisposeAsync` contains operational code without `try/catch`.
+Warning when `Dispose` or `DisposeAsync` performs failure-prone cleanup without meaningful exception handling.
+
+Notes:
+- `DisposeCore`-style helpers are analyzed transitively, but the warning stays on `Dispose` or `DisposeAsync`
+- pure delegation to a safe local cleanup helper is accepted
+- trivial local cleanup alone does not trigger `NTBA0004`
+- a swallowed catch can still trigger `NTBA0004` alongside `NTBA0008`
 
 ### `NTBA0005`
 

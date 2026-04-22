@@ -37,12 +37,12 @@ internal static class DiagnosticDescriptors
 
     public static readonly DiagnosticDescriptor DisposeMissingTryCatch = new(
         id: "NTBA0004",
-        title: "Dispose method should use try/catch",
-        messageFormat: "Dispose method '{0}' in interactive component '{1}' should protect operational code with try/catch",
+        title: "Dispose method should use meaningful exception handling",
+        messageFormat: "Dispose method '{0}' in interactive component '{1}' performs failure-prone cleanup without meaningful exception handling",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Interactive Blazor dispose methods should use try/catch around operational code to avoid unhandled cleanup failures.");
+        description: "Failure-prone cleanup in interactive Blazor Dispose and DisposeAsync methods should use meaningful exception handling. Delegation to a safe local cleanup helper is acceptable.");
 
     public static readonly DiagnosticDescriptor JsInteropMissingTryCatch = new(
         id: "NTBA0005",

@@ -128,7 +128,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
     }
 
     [Fact]
-    public async Task DisposeMethod_WithoutTryCatch_ReportsNtba0004()
+    public async Task DisposeMethod_WithOnlyTrivialCleanup_DoesNotReportNtba0004()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -148,8 +148,114 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     }
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0004");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0004");
         Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0002" && diagnostic.GetMessage().Contains("Method 'Dispose'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task DisposeMethod_WithFailureProneHelperPath_ReportsNtba0004OnDispose()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "DisposeFailureComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    public void Dispose()
+                    {
+                        DisposeCore();
+                    }
+
+                    private void DisposeCore()
+                    {
+                        ThrowNow();
+                    }
+
+                    private void ThrowNow()
+                    {
+                        throw new global::System.InvalidOperationException();
+                    }
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0004" && diagnostic.GetMessage().Contains("Dispose", StringComparison.Ordinal));
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0004" && diagnostic.GetMessage().Contains("DisposeCore", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task DisposeMethod_DelegatingToHandledHelper_DoesNotReportNtba0004()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "HandledDisposeComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private Logger Logger { get; } = new Logger();
+
+                    public void Dispose() => DisposeCore();
+
+                    private void DisposeCore()
+                    {
+                        try
+                        {
+                            ThrowNow();
+                        }
+                        catch (global::System.Exception ex)
+                        {
+                            Logger.LogError(ex);
+                        }
+                    }
+
+                    private void ThrowNow()
+                    {
+                        throw new global::System.InvalidOperationException();
+                    }
+
+                    private sealed class Logger
+                    {
+                        public void LogError(global::System.Exception ex)
+                        {
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0004");
+    }
+
+    [Fact]
+    public async Task DisposeMethod_WithSwallowedCatch_StillReportsNtba0004()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "SwallowedDisposeComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    public void Dispose()
+                    {
+                        try
+                        {
+                            ThrowNow();
+                        }
+                        catch (global::System.Exception)
+                        {
+                        }
+                    }
+
+                    private void ThrowNow()
+                    {
+                        throw new global::System.InvalidOperationException();
+                    }
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0004");
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
     }
 
     [Fact]
