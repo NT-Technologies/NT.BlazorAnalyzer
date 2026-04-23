@@ -40,12 +40,40 @@ jobs:
       - name: Test With Coverage
         run: dotnet test NT.BlazorAnalyzer.slnx -c Release --no-build -p:TestingPlatformCommandLineArguments="--coverage --coverage-output-format cobertura --coverage-output ${{ github.workspace }}/TestResults/coverage.cobertura.xml"
 
+      - name: Dump Test Failure Logs
+        if: failure()
+        run: |
+          echo "Searching for Microsoft Testing Platform failure logs..."
+          mapfile -t test_logs < <(find "${{ github.workspace }}" -type f -path '*/TestResults/*.log' | sort)
+
+          if [ "${#test_logs[@]}" -eq 0 ]; then
+            echo "No test log files were found under TestResults."
+            exit 0
+          fi
+
+          for log_path in "${test_logs[@]}"; do
+            echo "::group::${log_path}"
+            cat "${log_path}"
+            echo "::endgroup::"
+          done
+
+      - name: Upload Test Result Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            TestResults/**
+            **/TestResults/**
+          if-no-files-found: ignore
+
       - name: Upload Coverage Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: TestResults/coverage.cobertura.xml
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   run-semantic-release:
     runs-on: ubuntu-latest
