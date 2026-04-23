@@ -64,38 +64,39 @@ internal static class DiagnosticDescriptors
 
     public static readonly DiagnosticDescriptor AsyncVoidMethod = new(
         id: "NTBA0007",
-        title: "Component method should not be async void",
-        messageFormat: "Method '{0}' in interactive component '{1}' is async void",
+        title: "Async component method should return Task",
+        messageFormat: "Async method '{0}' in interactive component '{1}' returns void; return Task or ValueTask so Blazor can observe exceptions",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Interactive Blazor component methods should return Task instead of async void so exceptions can be observed and handled.");
+        description: "Interactive Blazor component async methods should return Task or ValueTask instead of async void so the framework can observe completion and exception flow.");
 
     public static readonly DiagnosticDescriptor CatchWithoutLogging = new(
         id: "NTBA0008",
-        title: "Caught exceptions should be logged or rethrown",
-        messageFormat: "Catch block in method '{0}' in interactive component '{1}' should log, track, or rethrow the exception",
+        title: "Caught exceptions should report the caught exception or rethrow",
+        messageFormat: "Catch block in method '{0}' in interactive component '{1}' should log or report the caught exception object, or rethrow it",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Exception handling in interactive Blazor components should preserve diagnostics through logging, telemetry, or rethrowing.");
+        description: "Exception handling in interactive Blazor components should preserve the caught exception through logging, telemetry, or rethrowing.");
 
     public static readonly DiagnosticDescriptor ErrorBoundaryMissingErrorContent = new(
         id: "NTBA0009",
-        title: "Root ErrorBoundary should define ErrorContent",
-        messageFormat: "Interactive component '{0}' opens ErrorBoundary first but does not provide ErrorContent",
+        title: "Root ErrorBoundary should consider custom ErrorContent",
+        messageFormat: "Interactive component '{0}' opens ErrorBoundary first but relies on the default ErrorBoundary fallback UI",
         category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true,
-        description: "Root ErrorBoundary components should provide ErrorContent so failures are surfaced meaningfully to users.",
+        description: "Custom ErrorContent is optional in Blazor, but user-facing root ErrorBoundary components usually benefit from a clearer fallback experience than the default UI.",
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
     public static readonly DiagnosticDescriptor LayoutBoundaryShouldBeRouteKeyed = new(
         id: "NTBA0010",
-        title: "Layouts should avoid ErrorBoundary",
-        messageFormat: "Layout component '{0}' uses ErrorBoundary. Prefer page/widget boundaries instead of wrapping layouts.",
+        title: "Static layout ErrorBoundary has limited interactive coverage",
+        messageFormat: "Layout component '{0}' uses ErrorBoundary in a static layout. In Blazor Web Apps this only covers static SSR and won't catch interactive event failures unless app routes are globally interactive.",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Layout-level ErrorBoundary usage can reset shared layout state and recreate long-lived UI hosts across navigation. Prefer placing boundaries at page or widget scope.");
+        description: "A layout-level ErrorBoundary in a static layout only covers static SSR in Blazor Web Apps. Prefer narrower page or widget boundaries, or adopt globally interactive app routes when broad layout recovery is intentional.",
+        customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 }

@@ -10,5 +10,5 @@ NTBA0005 | Reliability | Warning | Interactive JS interop should use try/catch h
 NTBA0006 | Reliability | Warning | JS interop before OnAfterRender should be guarded by interactivity.
 NTBA0007 | Reliability | Warning | Interactive component methods should not be async void.
 NTBA0008 | Reliability | Warning | Catch blocks in interactive components should log, track, or rethrow exceptions.
-NTBA0009 | Reliability | Warning | Root ErrorBoundary should provide ErrorContent.
-NTBA0010 | Reliability | Warning | Layouts should avoid ErrorBoundary and prefer page/widget boundaries.
+NTBA0009 | Reliability | Info | Root ErrorBoundary should consider custom ErrorContent.
+NTBA0010 | Reliability | Warning | Static layout ErrorBoundary has limited interactive coverage.

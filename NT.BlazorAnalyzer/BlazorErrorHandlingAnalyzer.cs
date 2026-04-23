@@ -62,6 +62,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             var locallyReportedMissingErrorBoundaryComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var locallyReportedBoundaryMissingErrorContentComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var locallyReportedMissingTryCatchMethods = new ConcurrentDictionary<IMethodSymbol, byte>(SymbolEqualityComparer.Default);
+            var globalInteractiveRoutesOwners = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var razorAdditionalFiles = CreateRazorAdditionalFileMap(compilationStartContext.Options.AdditionalFiles);
             var razorMarkupCache = new ConcurrentDictionary<string, RazorMarkupAnalysis?>(StringComparer.OrdinalIgnoreCase);
             var boundaryCoverageResolver = new BoundaryCoverageResolver(
@@ -153,6 +154,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     methodAnalyses,
                     boundaryComponentNames,
                     componentRenderAnalyses,
+                    globalInteractiveRoutesOwners,
                     locallyReportedMissingErrorBoundaryComponents,
                     locallyReportedBoundaryMissingErrorContentComponents,
                     razorAdditionalFiles,
@@ -176,6 +178,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     buildRenderTreeRootMethods,
                     methodAnalyses,
                     componentRenderAnalyses,
+                    globalInteractiveRoutesOwners,
                     locallyReportedMissingErrorBoundaryComponents,
                     locallyReportedBoundaryMissingErrorContentComponents,
                     locallyReportedMissingTryCatchMethods));
@@ -237,6 +240,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ConcurrentDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses,
         ConcurrentDictionary<string, byte> boundaryComponentNames,
         ConcurrentDictionary<INamedTypeSymbol, ComponentRenderAnalysis> componentRenderAnalyses,
+        ConcurrentDictionary<INamedTypeSymbol, byte> globalInteractiveRoutesOwners,
         ConcurrentDictionary<INamedTypeSymbol, byte> locallyReportedMissingErrorBoundaryComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> locallyReportedBoundaryMissingErrorContentComponents,
         ImmutableDictionary<string, AdditionalText> razorAdditionalFiles,
@@ -270,6 +274,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             if (methodDeclaration.Body is null)
             {
                 return;
+            }
+
+            if (HasInteractiveRoutesRenderMode(methodDeclaration.Body, context.SemanticModel, context.CancellationToken))
+            {
+                globalInteractiveRoutesOwners.TryAdd(containingType, 0);
             }
 
             var renderTreeAnalysis = AnalyzeBuildRenderTree(
@@ -336,16 +345,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 {
                     boundaryWithErrorContentComponents.TryAdd(containingType, 0);
                 }
-            }
-
-            if (containingType.InheritsFromOrEquals(layoutComponentBaseSymbol) &&
-                hasBoundaryRoot &&
-                boundaryLocation is not null)
-            {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    DiagnosticDescriptors.LayoutBoundaryShouldBeRouteKeyed,
-                    containingType.PreferNonGeneratedSourceLocation(boundaryLocation) ?? boundaryLocation,
-                    containingType.Name));
             }
 
             foreach (var referencedMethod in uncoveredRegions.SelectMany(static region => region.RootMethods))
@@ -612,6 +611,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ConcurrentDictionary<IMethodSymbol, byte> buildRenderTreeRootMethods,
         ConcurrentDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses,
         ConcurrentDictionary<INamedTypeSymbol, ComponentRenderAnalysis> componentRenderAnalyses,
+        ConcurrentDictionary<INamedTypeSymbol, byte> globalInteractiveRoutesOwners,
         ConcurrentDictionary<INamedTypeSymbol, byte> locallyReportedMissingErrorBoundaryComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> locallyReportedBoundaryMissingErrorContentComponents,
         ConcurrentDictionary<IMethodSymbol, byte> locallyReportedMissingTryCatchMethods)
@@ -621,6 +621,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         var boundaryProtectedRenderModes = ComputeBoundaryProtectedRenderModes(relevantComponents, effectiveRenderModes, localBoundaryComponents, componentOwners);
         var boundaryProtectedComponents = ComputeBoundaryProtectedComponents(relevantComponents, effectiveRenderModes, boundaryProtectedRenderModes);
         var suggestedBoundaryResolvers = ComputeSuggestedBoundaryResolvers(relevantComponents, effectiveRenderModes, boundaryProtectedRenderModes, componentOwners);
+        var hasGlobalInteractiveRoutes = globalInteractiveRoutesOwners.Count > 0;
 
         foreach (var component in relevantComponents.OrderBy(static type => type.ToDisplayString(), StringComparer.Ordinal))
         {
@@ -715,6 +716,34 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                         method.Name,
                         component.Name));
                 }
+            }
+        }
+
+        if (!hasGlobalInteractiveRoutes)
+        {
+            foreach (var layoutComponent in layoutComponents.Keys
+                         .Distinct<INamedTypeSymbol>(SymbolEqualityComparer.Default)
+                         .OrderBy(static component => component.ToDisplayString(), StringComparer.Ordinal))
+            {
+                if (!rootBoundaryComponents.ContainsKey(layoutComponent))
+                {
+                    continue;
+                }
+
+                var renderAnalysis = componentRenderAnalyses.TryGetValue(layoutComponent, out var knownRenderAnalysis)
+                    ? knownRenderAnalysis
+                    : new ComponentRenderAnalysis([], layoutComponent.GetPreferredSourceLocation());
+                var boundaryLocation = layoutComponent.PreferNonGeneratedSourceLocation(renderAnalysis.BoundaryLocation) ??
+                    layoutComponent.GetPreferredSourceLocation();
+                if (boundaryLocation is null)
+                {
+                    continue;
+                }
+
+                context.ReportDiagnostic(Diagnostic.Create(
+                    DiagnosticDescriptors.LayoutBoundaryShouldBeRouteKeyed,
+                    boundaryLocation,
+                    layoutComponent.Name));
             }
         }
 
@@ -2713,6 +2742,72 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
     }
 
+    private static bool HasInteractiveRoutesRenderMode(
+        BlockSyntax body,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        var componentStack = new Stack<INamedTypeSymbol?>();
+
+        foreach (var invocation in body.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
+        {
+            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess)
+            {
+                continue;
+            }
+
+            switch (memberAccess.Name.Identifier.ValueText)
+            {
+                case "OpenComponent":
+                    componentStack.Push(TryGetOpenedComponentType(invocation, semanticModel, cancellationToken));
+                    break;
+
+                case "CloseComponent":
+                    if (componentStack.Count > 0)
+                    {
+                        componentStack.Pop();
+                    }
+
+                    break;
+
+                case "AddComponentRenderMode":
+                    if (componentStack.Count > 0 &&
+                        componentStack.Peek() is { } currentComponent &&
+                        IsRoutesComponent(currentComponent))
+                    {
+                        return true;
+                    }
+
+                    break;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsRoutesComponent(INamedTypeSymbol componentType) =>
+        GetTypeMetadataNames(componentType).Any(static name => name == "Microsoft.AspNetCore.Components.Routing.Routes");
+
+    private static INamedTypeSymbol? TryGetOpenedComponentType(
+        InvocationExpressionSyntax invocation,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (TryGetComponentType(invocation, semanticModel, cancellationToken) is { } genericComponentType)
+        {
+            return genericComponentType;
+        }
+
+        if (invocation.Expression is MemberAccessExpressionSyntax &&
+            invocation.ArgumentList.Arguments.Count > 1 &&
+            invocation.ArgumentList.Arguments[1].Expression is TypeOfExpressionSyntax typeOfExpression)
+        {
+            return TryGetTypeInfo(typeOfExpression.Type, semanticModel, cancellationToken)?.Type as INamedTypeSymbol;
+        }
+
+        return null;
+    }
+
     private static IEnumerable<IMethodSymbol> GetCalledMemberMethods(
         MethodDeclarationSyntax methodDeclaration,
         SemanticModel semanticModel,
@@ -3484,8 +3579,14 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return true;
         }
 
+        var caughtExceptionName = catchClause.Declaration?.Identifier.ValueText;
         foreach (var invocation in catchClause.Block.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node)).OfType<InvocationExpressionSyntax>())
         {
+            if (!InvocationReportsCaughtException(invocation, caughtExceptionName, semanticModel, cancellationToken))
+            {
+                continue;
+            }
+
             if (invocation.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: var memberName } &&
                 (memberName.StartsWith("Log", StringComparison.Ordinal) || memberName is "TrackException" or "CaptureException" or "ReportException"))
             {
@@ -3493,7 +3594,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             }
 
             var symbol = TryGetSymbol(invocation, semanticModel, cancellationToken);
-            if (symbol is IMethodSymbol methodSymbol && IsLoggingOrTelemetryMethod(methodSymbol))
+            if (symbol is IMethodSymbol methodSymbol &&
+                IsLoggingOrTelemetryMethod(methodSymbol))
             {
                 return true;
             }
@@ -3546,14 +3648,72 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
     private static bool IsLoggingOrTelemetryMethod(IMethodSymbol methodSymbol)
     {
-        if (methodSymbol.Name.StartsWith("Log", StringComparison.Ordinal) ||
-            methodSymbol.Name is "TrackException" or "CaptureException" or "ReportException")
+        if (methodSymbol.Name is "TrackException" or "CaptureException" or "ReportException")
         {
             return true;
         }
 
-        return GetTypeMetadataNames(methodSymbol.ContainingType).Any(static metadataName =>
-            metadataName is "Microsoft.Extensions.Logging.ILogger" or "Microsoft.Extensions.Logging.LoggerExtensions");
+        return methodSymbol.Name.StartsWith("Log", StringComparison.Ordinal);
+    }
+
+    private static bool InvocationReportsCaughtException(
+        InvocationExpressionSyntax invocation,
+        string? caughtExceptionName,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(caughtExceptionName))
+        {
+            return false;
+        }
+
+        var caughtExceptionIdentifier = caughtExceptionName!;
+
+        foreach (var argument in invocation.ArgumentList.Arguments)
+        {
+            if (IsCaughtExceptionArgument(argument.Expression, caughtExceptionIdentifier, semanticModel, cancellationToken))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsCaughtExceptionArgument(
+        ExpressionSyntax expression,
+        string caughtExceptionName,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        expression = StripParentheses(expression);
+
+        if (expression is IdentifierNameSyntax identifierName &&
+            string.Equals(identifierName.Identifier.ValueText, caughtExceptionName, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (TryGetSymbol(expression, semanticModel, cancellationToken) is ILocalSymbol localSymbol &&
+            string.Equals(localSymbol.Name, caughtExceptionName, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return IsExceptionType(GetValueExpressionType(expression, semanticModel, cancellationToken));
+    }
+
+    private static bool IsExceptionType(ITypeSymbol? typeSymbol)
+    {
+        for (var current = typeSymbol as INamedTypeSymbol; current is not null; current = current.BaseType)
+        {
+            if (current.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", string.Empty) == "System.Exception")
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static ExpressionSyntax? TryGetSingleReturnedExpression(

@@ -1,3 +1,4 @@
+using Microsoft.CodeAnalysis;
 using Xunit;
 
 namespace NT.BlazorAnalyzer.Tests;
@@ -781,7 +782,8 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     __builder.CloseComponent();
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0009");
+        var diagnostic = Assert.Single(diagnostics, diagnostic => diagnostic.Id == "NTBA0009");
+        Assert.Equal(DiagnosticSeverity.Info, diagnostic.Severity);
     }
 
     [Fact]

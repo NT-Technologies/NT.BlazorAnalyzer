@@ -117,7 +117,7 @@ public sealed class BlazorCoverageRegressionTests
     }
 
     [Fact]
-    public async Task CatchCallingILoggerMember_DoesNotReportNtba0008()
+    public async Task CatchCallingILoggerScopeWithoutException_StillReportsNtba0008()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -144,7 +144,38 @@ public sealed class BlazorCoverageRegressionTests
                     }
                     """));
 
-        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
+    }
+
+    [Fact]
+    public async Task CatchCallingLoggerWithoutCaughtExceptionObject_StillReportsNtba0008()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "LoggerMessageOnlyComponent",
+                renderTreeStatements: CreateButtonRenderTree("HandleClick"),
+                razorMethods: """
+                    private global::Microsoft.Extensions.Logging.ILogger Logger => default!;
+
+                    private void HandleClick()
+                    {
+                        try
+                        {
+                            ThrowNow();
+                        }
+                        catch (global::System.Exception ex)
+                        {
+                            Logger.LogError(ex.Message);
+                        }
+                    }
+
+                    private void ThrowNow()
+                    {
+                        throw new global::System.InvalidOperationException();
+                    }
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
     }
 
     [Fact]
@@ -491,7 +522,7 @@ public sealed class BlazorCoverageRegressionTests
     }
 
     [Fact]
-    public async Task LayoutBoundary_ReportsNtba0010()
+    public async Task StaticLayoutBoundary_ReportsNtba0010()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             sources:
@@ -529,12 +560,12 @@ public sealed class BlazorCoverageRegressionTests
             ]);
 
         var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0010");
-        Assert.Contains("Prefer page/widget boundaries", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("static layout", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
         Assert.EndsWith("Components/MainLayout.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task LayoutBoundaryWithRouteKey_StillReportsNtba0010()
+    public async Task StaticLayoutBoundaryWithRouteKey_StillReportsNtba0010()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             sources:
@@ -579,7 +610,7 @@ public sealed class BlazorCoverageRegressionTests
     }
 
     [Fact]
-    public async Task LayoutBoundaryWithSnapshotRouteKey_ReportsNtba0010()
+    public async Task StaticLayoutBoundaryWithSnapshotRouteKey_ReportsNtba0010()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             sources:
@@ -638,8 +669,59 @@ public sealed class BlazorCoverageRegressionTests
             ]);
 
         var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0010");
-        Assert.Contains("Prefer page/widget boundaries", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("won't catch interactive event failures", diagnostic.GetMessage(), StringComparison.OrdinalIgnoreCase);
         Assert.EndsWith("Components/MainLayout.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LayoutBoundary_WithGloballyInteractiveRoutes_DoesNotReportNtba0010()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateStaticComponent(
+                    componentName: "MainLayout",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                        __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                        {
+                            __builder2.AddContent(2, Body);
+                        }));
+                        __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                        {
+                            __builder3.OpenElement(4, "p");
+                            __builder3.CloseElement();
+                        }));
+                        __builder.CloseComponent();
+                        """,
+                    baseType: "global::Microsoft.AspNetCore.Components.LayoutComponentBase"),
+                TestComponentSources.CreateStaticComponent(
+                    componentName: "App",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.HeadOutlet>(0);
+                        __builder.AddComponentRenderMode(global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer);
+                        __builder.CloseComponent();
+                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Routing.Routes>(1);
+                        __builder.AddComponentRenderMode(global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer);
+                        __builder.CloseComponent();
+                        """)
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "MainLayout",
+                    markup: """
+                        @inherits LayoutComponentBase
+                        <ErrorBoundary>
+                            @Body
+                            <ErrorContent>
+                                <p>Error</p>
+                            </ErrorContent>
+                        </ErrorBoundary>
+                        """)
+            ]);
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0010");
     }
 
     [Fact]

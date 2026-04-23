@@ -108,20 +108,36 @@ Notes:
 
 Warning on `async void` methods in interactive components.
 
+Notes:
+- aligns with Blazor guidance to return `Task` or `ValueTask` from asynchronous component methods
+- the goal is to keep completion and exception flow observable to the framework
+
 ### `NTBA0008`
 
 Warning on `catch` blocks that neither:
-- log
-- track/report telemetry
+- log or report the caught exception object
 - nor rethrow
+
+Notes:
+- scope-only or message-only calls such as `Logger.BeginScope(...)` or `Logger.LogError(ex.Message)` do not satisfy the rule
+- expected `JSDisconnectedException` cleanup during JS object disposal is still treated as an accepted pattern
 
 ### `NTBA0009`
 
-Warning when a component opens `ErrorBoundary` first but does not provide `ErrorContent`.
+Info when a component opens `ErrorBoundary` first but relies on the default `ErrorBoundary` fallback UI.
+
+Notes:
+- custom `ErrorContent` is optional in Blazor
+- this rule is a UX recommendation for root or broadly user-visible boundaries, not a framework requirement
 
 ### `NTBA0010`
 
-Warning when a layout component uses a root `ErrorBoundary`. Prefer placing boundaries at page or widget scope instead of wrapping layouts.
+Warning when a static layout component uses a root `ErrorBoundary` without globally interactive app routes.
+
+Notes:
+- in Blazor Web Apps, a static layout boundary only covers static SSR
+- it doesn't catch interactive event-handler failures unless app routes are globally interactive
+- narrower page or widget boundaries are usually the safer default
 
 ## Warning Examples
 
@@ -485,7 +501,7 @@ Why:
 }
 ```
 
-### Emits `NTBA0009` when root `ErrorBoundary` has no `ErrorContent`
+### Emits `NTBA0009` as a UX recommendation when root `ErrorBoundary` has no `ErrorContent`
 
 ```razor
 @rendermode InteractiveServer
@@ -495,7 +511,7 @@ Why:
 </ErrorBoundary>
 ```
 
-### Emits `NTBA0010` when a layout uses `ErrorBoundary`
+### Emits `NTBA0010` when a static layout uses `ErrorBoundary`
 
 ```razor
 @inherits LayoutComponentBase
@@ -508,12 +524,10 @@ Why:
 </ErrorBoundary>
 ```
 
-Prefer:
-
-```razor
-@* Layout keeps shared chrome and long-lived hosts outside page-local boundaries *@
-@Body
-```
+Why:
+- the layout boundary only covers static SSR unless app routes are globally interactive
+- interactive event failures below the layout can still bypass the layout boundary in Blazor Web Apps
+- narrower page or widget boundaries are usually a better default
 
 ## Build And Test
 
