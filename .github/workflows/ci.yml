@@ -53,7 +53,7 @@ jobs:
 
           for log_path in "${test_logs[@]}"; do
             echo "::group::${log_path}"
-            cat "${log_path}"
+            grep -a -v 'tests running' "${log_path}" | sed '/^[[:space:]]*$/d'
             echo "::endgroup::"
           done
 

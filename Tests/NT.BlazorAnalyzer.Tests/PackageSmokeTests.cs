@@ -11,6 +11,7 @@ public sealed class PackageSmokeTests
     {
         var cancellationToken = TestContext.Current.CancellationToken;
         var repositoryRoot = FindRepositoryRoot();
+        var buildConfiguration = FindCurrentBuildConfiguration();
         var projectPath = Path.Combine(repositoryRoot, "NT.BlazorAnalyzer", "NT.BlazorAnalyzer.csproj");
         var outputDirectory = Path.Combine(Path.GetTempPath(), "nt-blazoranalyzer-pack-smoke", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(outputDirectory);
@@ -26,7 +27,7 @@ public sealed class PackageSmokeTests
             processStartInfo.ArgumentList.Add("pack");
             processStartInfo.ArgumentList.Add(projectPath);
             processStartInfo.ArgumentList.Add("-c");
-            processStartInfo.ArgumentList.Add("Debug");
+            processStartInfo.ArgumentList.Add(buildConfiguration);
             processStartInfo.ArgumentList.Add("--no-build");
             processStartInfo.ArgumentList.Add("--no-restore");
             processStartInfo.ArgumentList.Add("-o");
@@ -77,5 +78,21 @@ public sealed class PackageSmokeTests
         }
 
         throw new InvalidOperationException("Could not locate the repository root.");
+    }
+
+    private static string FindCurrentBuildConfiguration()
+    {
+        var currentDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (currentDirectory?.Parent is not null)
+        {
+            if (string.Equals(currentDirectory.Parent.Name, "bin", StringComparison.OrdinalIgnoreCase))
+            {
+                return currentDirectory.Name;
+            }
+
+            currentDirectory = currentDirectory.Parent;
+        }
+
+        throw new InvalidOperationException($"Could not determine the current build configuration from '{AppContext.BaseDirectory}'.");
     }
 }
