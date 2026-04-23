@@ -38,7 +38,7 @@ jobs:
         run: dotnet build NT.BlazorAnalyzer.slnx -c Release --no-restore -v minimal
 
       - name: Test With Coverage
-        run: dotnet test NT.BlazorAnalyzer.slnx -c Release --no-build -v minimal -p:TestingPlatformCommandLineArguments="--coverage --coverage-output-format cobertura --coverage-output ${{ github.workspace }}/TestResults/coverage.cobertura.xml"
+        run: dotnet test NT.BlazorAnalyzer.slnx -c Release --no-build -p:TestingPlatformCommandLineArguments="--coverage --coverage-output-format cobertura --coverage-output ${{ github.workspace }}/TestResults/coverage.cobertura.xml"
 
       - name: Upload Coverage Artifact
         uses: actions/upload-artifact@v4
