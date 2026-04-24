@@ -900,6 +900,113 @@ public sealed class BlazorCoverageRegressionTests
     }
 
     [Fact]
+    public async Task MissingErrorBoundary_ForInteractivePageRegionsNestedInsideInertHtmlRoot_ReportsNestedRegions()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateStaticComponent(
+                    componentName: "PageHeader",
+                    renderTreeStatements: """
+                        __builder.OpenElement(0, "h1");
+                        __builder.CloseElement();
+                        """),
+                new SourceFile(
+                    Path: "Components/TnTInputText.razor.g.cs",
+                    Text: """
+                        namespace TestComponents
+                        {
+                            public partial class TnTInputText : global::Microsoft.AspNetCore.Components.ComponentBase
+                            {
+                                [global::Microsoft.AspNetCore.Components.Parameter]
+                                public string? Value { get; set; }
+
+                                [global::Microsoft.AspNetCore.Components.Parameter]
+                                public global::Microsoft.AspNetCore.Components.EventCallback<string?> ValueChanged { get; set; }
+
+                                protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                                {
+                                    __builder.OpenElement(0, "input");
+                                    __builder.CloseElement();
+                                }
+                            }
+                        }
+                        """),
+                new SourceFile(
+                    Path: "Components/TnTDataGrid.razor.g.cs",
+                    Text: """
+                        namespace TestComponents
+                        {
+                            public partial class TnTDataGrid : global::Microsoft.AspNetCore.Components.ComponentBase
+                            {
+                                [global::Microsoft.AspNetCore.Components.Parameter]
+                                public global::Microsoft.AspNetCore.Components.EventCallback<string> OnRowClicked { get; set; }
+
+                                protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                                {
+                                    __builder.OpenElement(0, "table");
+                                    __builder.CloseElement();
+                                }
+                            }
+                        }
+                        """),
+                TestComponentSources.CreateInteractiveComponent(
+                    componentName: "Roles",
+                    renderTreeStatements: """
+                        __builder.OpenComponent<global::TestComponents.PageHeader>(0);
+                        __builder.AddComponentParameter(1, "Title", global::Microsoft.AspNetCore.Components.CompilerServices.RuntimeHelpers.TypeCheck<string>("Roles"));
+                        __builder.AddComponentParameter(2, "SetPageTitle", global::Microsoft.AspNetCore.Components.CompilerServices.RuntimeHelpers.TypeCheck<bool>(true));
+                        __builder.CloseComponent();
+
+                        __builder.OpenElement(3, "div");
+                        __builder.OpenElement(4, "div");
+                        __builder.OpenComponent<global::TestComponents.TnTInputText>(5);
+                        __builder.AddComponentParameter(6, "Value", global::Microsoft.AspNetCore.Components.CompilerServices.RuntimeHelpers.TypeCheck<string?>(_filter));
+                        __builder.AddComponentParameter(7, "ValueChanged", global::Microsoft.AspNetCore.Components.CompilerServices.RuntimeHelpers.TypeCheck<global::Microsoft.AspNetCore.Components.EventCallback<string?>>(global::Microsoft.AspNetCore.Components.EventCallback.Factory.CreateBinder<string?>(this, __value => _filter = __value, _filter)));
+                        __builder.CloseComponent();
+                        __builder.CloseElement();
+
+                        __builder.OpenComponent<global::TestComponents.TnTDataGrid>(8);
+                        __builder.AddComponentParameter(9, "OnRowClicked", global::Microsoft.AspNetCore.Components.CompilerServices.RuntimeHelpers.TypeCheck<global::Microsoft.AspNetCore.Components.EventCallback<string>>(global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create<string>(this, value => OpenRole(value))));
+                        __builder.CloseComponent();
+                        __builder.CloseElement();
+                        """,
+                    razorMethods: """
+                        private string? _filter;
+
+                        private void OpenRole(string role)
+                        {
+                        }
+                        """)
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "Roles",
+                    markup: """
+                        @rendermode InteractiveServer
+
+                        <PageHeader Title="Roles" />
+
+                        <div class="roles">
+                            <div class="filters">
+                                <TnTInputText @bind-Value="_filter" />
+                            </div>
+
+                            <TnTDataGrid OnRowClicked="@((string value) => OpenRole(value))" />
+                        </div>
+                        """)
+            ]);
+
+        var ntba0001Diagnostics = diagnostics.Where(static diagnostic => diagnostic.Id == "NTBA0001").ToArray();
+
+        Assert.Collection(
+            ntba0001Diagnostics,
+            diagnostic => Assert.Contains("TnTInputText", diagnostic.GetMessage(), StringComparison.Ordinal),
+            diagnostic => Assert.Contains("TnTDataGrid", diagnostic.GetMessage(), StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task SharedRenderModeCoverage_WorksAcrossDifferentModePropertySyntax()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(

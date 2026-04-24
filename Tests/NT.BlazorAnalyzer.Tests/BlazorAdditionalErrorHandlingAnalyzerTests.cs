@@ -1153,8 +1153,8 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
 
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'EditDiaryNoteForm'", StringComparison.Ordinal));
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'NewDiaryNoteForm'", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'DiaryNoteForm'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'EditDiaryNoteForm'", StringComparison.Ordinal));
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'DiaryNoteForm'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("'NewDiaryNoteForm'", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'DiaryNoteForm'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("TestComponents.EditDiaryNoteForm", StringComparison.Ordinal));
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0001" && diagnostic.GetMessage().Contains("component 'DiaryNoteForm'", StringComparison.Ordinal) && diagnostic.GetMessage().Contains("TestComponents.NewDiaryNoteForm", StringComparison.Ordinal));
     }
 
     [Fact]

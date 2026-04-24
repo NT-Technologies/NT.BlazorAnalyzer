@@ -650,11 +650,15 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
                     foreach (var resolverSymbol in resolverSymbols)
                     {
+                        var regionName = string.IsNullOrWhiteSpace(uncoveredRegion.RootName)
+                            ? resolverSymbol.Name
+                            : uncoveredRegion.RootName;
+
                         context.ReportDiagnostic(Diagnostic.Create(
                             DiagnosticDescriptors.MissingErrorBoundary,
                             regionLocation,
                             component.Name,
-                            resolverSymbol.Name,
+                            regionName,
                             resolverSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", string.Empty)));
                     }
                 }
@@ -2030,6 +2034,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     break;
 
                 case "AddAttribute":
+                case "AddComponentParameter":
                     currentRoot?.AnalyzeAttribute(invocation, semanticModel, cancellationToken);
                     break;
 
@@ -2538,7 +2543,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         var valueSymbol = TryGetSymbol(valueExpression, semanticModel, cancellationToken);
-        if (valueSymbol is IMethodSymbol)
+        if (valueExpression is not InvocationExpressionSyntax && valueSymbol is IMethodSymbol)
         {
             return InteractiveRenderRegionKind.ComponentCallback;
         }
