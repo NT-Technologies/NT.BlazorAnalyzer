@@ -223,7 +223,7 @@ public sealed class BlazorCoverageRegressionTests
                     {
                         try
                         {
-                            global::System.Console.WriteLine(currentCount);
+                            throw new global::System.InvalidOperationException();
                         }
                         finally
                         {

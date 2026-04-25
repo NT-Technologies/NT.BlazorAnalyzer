@@ -725,9 +725,16 @@ public sealed class BlazorErrorHandlingAnalyzerTests
             TestComponentSources.CreateCodeBehind(
                 componentName: "FetchData",
                 methods: """
+                    private DataService Service { get; } = new();
+
                     private async global::System.Threading.Tasks.Task LoadAsync()
                     {
-                        await global::System.Threading.Tasks.Task.CompletedTask;
+                        await Service.LoadAsync();
+                    }
+
+                    private sealed class DataService
+                    {
+                        public global::System.Threading.Tasks.Task LoadAsync() => global::System.Threading.Tasks.Task.CompletedTask;
                     }
                     """));
 

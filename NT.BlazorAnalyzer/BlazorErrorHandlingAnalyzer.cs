@@ -1532,7 +1532,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             isLifecycleMethod: IsLifecycleMethod(methodSymbol),
             isDisposeMethod: IsDisposeMethod(methodSymbol),
             hasOperationalCode: HasOperationalCode(methodDeclaration),
-            hasFailureProneOperation: HasFailureProneOperation(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken),
+            hasFailureProneOperation: HasFailureProneOperation(
+                methodDeclaration,
+                semanticModel,
+                methodSymbol.ContainingType,
+                treatExplicitThrowsAsFailureProne: !IsLifecycleMethod(methodSymbol),
+                cancellationToken),
             hasJsInteropCalls: jsInteropCalls.Length > 0,
             hasUnhandledJsInteropCalls: unhandledJsInteropCalls.Length > 0,
             hasUnguardedJsInteropCalls: jsInteropCalls.Any(call => !IsWithinInteractivityGuard(call, semanticModel, methodSymbol.ContainingType, cancellationToken)),
@@ -1575,6 +1580,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         MethodDeclarationSyntax methodDeclaration,
         SemanticModel semanticModel,
         INamedTypeSymbol containingType,
+        bool treatExplicitThrowsAsFailureProne,
         CancellationToken cancellationToken)
     {
         var rootNode = GetMethodExecutableRoot(methodDeclaration);
@@ -1587,21 +1593,191 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         {
             switch (node)
             {
-                case ThrowStatementSyntax:
-                case ThrowExpressionSyntax:
+                case ThrowStatementSyntax when treatExplicitThrowsAsFailureProne:
+                case ThrowExpressionSyntax when treatExplicitThrowsAsFailureProne:
                     return true;
 
                 case AwaitExpressionSyntax awaitExpression
-                    when GetInvokedMemberMethod(awaitExpression.Expression, semanticModel, containingType, cancellationToken) is null:
+                    when IsFailureProneAwaitExpression(awaitExpression, semanticModel, containingType, cancellationToken):
                     return true;
 
                 case InvocationExpressionSyntax invocation
-                    when GetInvokedMemberMethod(invocation, semanticModel, containingType, cancellationToken) is null:
+                    when IsFailureProneInvocation(invocation, semanticModel, containingType, cancellationToken, isAwaited: false):
                     return true;
             }
         }
 
         return false;
+    }
+
+    private static bool IsFailureProneAwaitExpression(
+        AwaitExpressionSyntax awaitExpression,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken)
+    {
+        var expression = awaitExpression.Expression;
+        while (expression is ParenthesizedExpressionSyntax parenthesizedExpression)
+        {
+            expression = parenthesizedExpression.Expression;
+        }
+
+        if (expression is InvocationExpressionSyntax invocation)
+        {
+            return IsFailureProneInvocation(invocation, semanticModel, containingType, cancellationToken, isAwaited: true);
+        }
+
+        return !IsKnownCompletedTaskExpression(expression, semanticModel, cancellationToken);
+    }
+
+    private static bool IsFailureProneInvocation(
+        InvocationExpressionSyntax invocation,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        CancellationToken cancellationToken,
+        bool isAwaited)
+    {
+        if (GetInvokedMemberMethod(invocation, semanticModel, containingType, cancellationToken) is not null)
+        {
+            return false;
+        }
+
+        if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+            IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken))
+        {
+            return true;
+        }
+
+        if (TryGetSymbol(invocation, semanticModel, cancellationToken) is not IMethodSymbol methodSymbol)
+        {
+            return isAwaited;
+        }
+
+        methodSymbol = NormalizeMethodSymbol(methodSymbol);
+        if (IsJsInteropMethod(methodSymbol) || IsKnownLowRiskInvocation(invocation, methodSymbol))
+        {
+            return IsJsInteropMethod(methodSymbol);
+        }
+
+        return isAwaited || IsOperationalExternalInvocation(invocation, methodSymbol, semanticModel, cancellationToken);
+    }
+
+    private static bool IsKnownCompletedTaskExpression(
+        ExpressionSyntax expression,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (TryGetSymbol(expression, semanticModel, cancellationToken) is not IPropertySymbol propertySymbol)
+        {
+            return false;
+        }
+
+        return propertySymbol.Name is "CompletedTask" &&
+               GetTypeMetadataNames(propertySymbol.ContainingType).Any(static name => name == "System.Threading.Tasks.Task");
+    }
+
+    private static bool IsKnownLowRiskInvocation(InvocationExpressionSyntax invocation, IMethodSymbol methodSymbol)
+    {
+        if (invocation.Expression is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax } &&
+            methodSymbol.Name is "OnInitialized" or "OnInitializedAsync" or "OnParametersSet" or "OnParametersSetAsync" or "OnAfterRender" or "OnAfterRenderAsync")
+        {
+            return true;
+        }
+
+        var containingTypeNames = GetTypeMetadataNames(methodSymbol.ContainingType).ToArray();
+        if (containingTypeNames.Any(static name =>
+                name is "Microsoft.AspNetCore.Components.ComponentBase" or
+                    "System.Threading.Tasks.Task" or
+                    "System.Threading.Tasks.ValueTask" or
+                    "System.Nullable" or
+                    "System.Type" or
+                    "System.String" or
+                    "System.Guid" ||
+                name.StartsWith("System.Linq.", StringComparison.Ordinal) ||
+                name.StartsWith("System.Reflection.", StringComparison.Ordinal) ||
+                name.StartsWith("System.Collections.", StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        return methodSymbol.ContainingNamespace?.ToDisplayString() is { } containingNamespace &&
+               (containingNamespace.StartsWith("System.Linq", StringComparison.Ordinal) ||
+                containingNamespace.StartsWith("System.Reflection", StringComparison.Ordinal) ||
+                containingNamespace.StartsWith("Microsoft.Extensions.DependencyInjection", StringComparison.Ordinal));
+    }
+
+    private static bool IsOperationalExternalInvocation(
+        InvocationExpressionSyntax invocation,
+        IMethodSymbol methodSymbol,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (!IsOperationalMethodName(methodSymbol.Name))
+        {
+            return false;
+        }
+
+        if (TryGetInvocationReceiverType(invocation, methodSymbol, semanticModel, cancellationToken) is not INamedTypeSymbol receiverType ||
+            IsKnownLowRiskReceiverType(receiverType))
+        {
+            return false;
+        }
+
+        return GetTypeMetadataNames(receiverType).Any(static name =>
+            name.EndsWith("Repository", StringComparison.Ordinal) ||
+            name.EndsWith("Service", StringComparison.Ordinal) ||
+            name.EndsWith("Client", StringComparison.Ordinal) ||
+            name.EndsWith("Provider", StringComparison.Ordinal) ||
+            name.EndsWith("Manager", StringComparison.Ordinal) ||
+            name.EndsWith("Store", StringComparison.Ordinal) ||
+            name.EndsWith("Context", StringComparison.Ordinal) ||
+            name.EndsWith("DbContext", StringComparison.Ordinal));
+    }
+
+    private static bool IsKnownLowRiskReceiverType(INamedTypeSymbol receiverType) =>
+        GetTypeMetadataNames(receiverType).Any(static name =>
+            name is "Microsoft.AspNetCore.Components.NavigationManager" or
+                "System.IServiceProvider");
+
+    private static bool IsOperationalMethodName(string methodName) =>
+        methodName.StartsWith("Get", StringComparison.Ordinal) ||
+        methodName.StartsWith("Load", StringComparison.Ordinal) ||
+        methodName.StartsWith("Save", StringComparison.Ordinal) ||
+        methodName.StartsWith("Search", StringComparison.Ordinal) ||
+        methodName.StartsWith("Export", StringComparison.Ordinal) ||
+        methodName.StartsWith("Import", StringComparison.Ordinal) ||
+        methodName.StartsWith("Open", StringComparison.Ordinal) ||
+        methodName.StartsWith("Download", StringComparison.Ordinal) ||
+        methodName.StartsWith("Upload", StringComparison.Ordinal) ||
+        methodName.StartsWith("Refresh", StringComparison.Ordinal) ||
+        methodName.StartsWith("Invoke", StringComparison.Ordinal) ||
+        methodName.StartsWith("Send", StringComparison.Ordinal) ||
+        methodName.StartsWith("Submit", StringComparison.Ordinal) ||
+        methodName.StartsWith("Create", StringComparison.Ordinal) ||
+        methodName.StartsWith("Update", StringComparison.Ordinal) ||
+        methodName.StartsWith("Patch", StringComparison.Ordinal) ||
+        methodName.StartsWith("Delete", StringComparison.Ordinal) ||
+        methodName.StartsWith("Remove", StringComparison.Ordinal) ||
+        methodName.StartsWith("Archive", StringComparison.Ordinal) ||
+        methodName.StartsWith("Restore", StringComparison.Ordinal);
+
+    private static ITypeSymbol? TryGetInvocationReceiverType(
+        InvocationExpressionSyntax invocation,
+        IMethodSymbol methodSymbol,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
+        {
+            return GetValueExpressionType(memberAccess.Expression, semanticModel, cancellationToken);
+        }
+
+        if (methodSymbol.IsExtensionMethod && methodSymbol.Parameters.Length > 0)
+        {
+            return methodSymbol.Parameters[0].Type;
+        }
+
+        return null;
     }
 
     private static ImmutableHashSet<IMethodSymbol> FindUnsafeRootMethods(

@@ -16,14 +16,16 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """,
                 razorMethods: """
+                    private DataService Service { get; } = new();
+
                     protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
                     {
-                        await LoadAsync();
+                        await Service.LoadAsync();
                     }
 
-                    private async global::System.Threading.Tasks.Task LoadAsync()
+                    private sealed class DataService
                     {
-                        await global::System.Threading.Tasks.Task.CompletedTask;
+                        public global::System.Threading.Tasks.Task LoadAsync() => global::System.Threading.Tasks.Task.CompletedTask;
                     }
                     """));
 
@@ -45,6 +47,99 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     protected override void OnParametersSet()
                     {
                         currentCount++;
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithBaseCallAndCollectionNormalization_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "NormalizedLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private Dto Value { get; } = new();
+                    private global::System.Collections.Generic.HashSet<string> selectedEmails = [];
+                    private Model model = new();
+
+                    protected override void OnParametersSet()
+                    {
+                        base.OnParametersSet();
+                        selectedEmails = global::System.Linq.Enumerable.ToHashSet(Value.Emails);
+                        model = new Model
+                        {
+                            Name = Value.Name
+                        };
+                    }
+
+                    private sealed class Dto
+                    {
+                        public global::System.Collections.Generic.IEnumerable<string> Emails { get; } = [];
+
+                        public string Name { get; } = "";
+                    }
+
+                    private sealed class Model
+                    {
+                        public string Name { get; set; } = "";
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithReflectionMetadataSetup_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "ReflectionLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private global::System.Reflection.PropertyInfo[] properties = [];
+
+                    protected override void OnInitialized()
+                    {
+                        base.OnInitialized();
+                        var type = global::System.Nullable.GetUnderlyingType(typeof(int?)) ?? typeof(int?);
+                        properties = global::System.Linq.Enumerable.ToArray(
+                            global::System.Linq.Enumerable.Where(type.GetProperties(), static property => property.CanRead));
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithOnlyParameterGuardThrow_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "GuardLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    [global::Microsoft.AspNetCore.Components.Parameter]
+                    public string? Value { get; set; }
+
+                    protected override void OnParametersSet()
+                    {
+                        base.OnParametersSet();
+                        if (Value is null)
+                        {
+                            throw new global::System.ArgumentNullException(nameof(Value));
+                        }
                     }
                     """));
 
@@ -107,20 +202,22 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     __builder.CloseElement();
                     """,
                 razorMethods: """
+                    private DataService Service { get; } = new();
+
                     protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
                     {
                         try
                         {
-                            await LoadAsync();
+                            await Service.LoadAsync();
                         }
                         catch (global::System.Exception)
                         {
                         }
                     }
 
-                    private async global::System.Threading.Tasks.Task LoadAsync()
+                    private sealed class DataService
                     {
-                        await global::System.Threading.Tasks.Task.CompletedTask;
+                        public global::System.Threading.Tasks.Task LoadAsync() => global::System.Threading.Tasks.Task.CompletedTask;
                     }
                     """));
 
