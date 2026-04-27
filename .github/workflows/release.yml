@@ -67,6 +67,36 @@ jobs:
       - name: Test
         run: dotnet test NT.BlazorAnalyzer.slnx -c Release --no-build -v minimal
 
+      - name: Dump Test Failure Logs
+        if: failure()
+        run: |
+          set -o pipefail
+          echo "Searching for Microsoft Testing Platform failure logs..."
+          mapfile -t test_logs < <(find "${{ github.workspace }}" -type f -path '*/TestResults/*.log' | sort)
+
+          if [ "${#test_logs[@]}" -eq 0 ]; then
+            echo "No test log files were found under TestResults."
+            exit 0
+          fi
+
+          for log_path in "${test_logs[@]}"; do
+            echo "::group::${log_path}"
+            if ! iconv -f utf-16 -t utf-8 "${log_path}" 2>/dev/null | grep -v 'tests running' | sed '/^[[:space:]]*$/d'; then
+              grep -a -v 'tests running' "${log_path}" | sed '/^[[:space:]]*$/d'
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Upload Test Result Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-nuget-test-results
+          path: |
+            TestResults/**
+            **/TestResults/**
+          if-no-files-found: ignore
+
       - name: Pack
         shell: bash
         run: |
