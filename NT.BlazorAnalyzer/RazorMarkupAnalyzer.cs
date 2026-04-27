@@ -28,6 +28,7 @@ internal static class RazorMarkupAnalyzer
         Location? boundaryRootLocation = null;
         var htmlInteractiveRegions = ImmutableArray.CreateBuilder<RazorMarkupRegion>();
         var componentRoots = ImmutableArray.CreateBuilder<RazorComponentRoot>();
+        var boundaryProtectedComponentNames = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
         var boundaryProtectedDynamicComponentTypeParameters = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
 
         for (var index = 0; index < text.Length;)
@@ -120,6 +121,11 @@ internal static class RazorMarkupAnalyzer
                 hasBoundaryProtectedContent = true;
             }
 
+            if (activeBoundaryCount > 0 && isComponent && !isBoundary && !isIgnoredRoot)
+            {
+                boundaryProtectedComponentNames.Add(GetSimpleTagName(tag.Name));
+            }
+
             if (activeBoundaryCount > 0 &&
                 string.Equals(GetSimpleTagName(tag.Name), "DynamicComponent", StringComparison.Ordinal) &&
                 TryGetAttributeValue(tag.Attributes, "Type") is { } dynamicComponentTypeParameter)
@@ -140,6 +146,7 @@ internal static class RazorMarkupAnalyzer
             boundaryRootLocation,
             htmlInteractiveRegions: htmlInteractiveRegions.ToImmutable(),
             componentRoots: componentRoots.ToImmutable(),
+            boundaryProtectedComponentNames: boundaryProtectedComponentNames.ToImmutable(),
             boundaryProtectedDynamicComponentTypeParameters: boundaryProtectedDynamicComponentTypeParameters.ToImmutable());
     }
 
@@ -634,6 +641,7 @@ internal sealed class RazorMarkupAnalysis
             boundaryRootLocation,
             htmlInteractiveRegions,
             componentRoots,
+            ImmutableHashSet<string>.Empty,
             ImmutableHashSet<string>.Empty)
     {
     }
@@ -645,6 +653,7 @@ internal sealed class RazorMarkupAnalysis
         Location? boundaryRootLocation,
         ImmutableArray<RazorMarkupRegion> htmlInteractiveRegions,
         ImmutableArray<RazorComponentRoot> componentRoots,
+        ImmutableHashSet<string> boundaryProtectedComponentNames,
         ImmutableHashSet<string> boundaryProtectedDynamicComponentTypeParameters)
     {
         HasBoundaryRoot = hasBoundaryRoot;
@@ -653,6 +662,7 @@ internal sealed class RazorMarkupAnalysis
         BoundaryRootLocation = boundaryRootLocation;
         HtmlInteractiveRegions = htmlInteractiveRegions;
         ComponentRoots = componentRoots;
+        BoundaryProtectedComponentNames = boundaryProtectedComponentNames;
         BoundaryProtectedDynamicComponentTypeParameters = boundaryProtectedDynamicComponentTypeParameters;
     }
 
@@ -667,6 +677,8 @@ internal sealed class RazorMarkupAnalysis
     public ImmutableArray<RazorMarkupRegion> HtmlInteractiveRegions { get; }
 
     public ImmutableArray<RazorComponentRoot> ComponentRoots { get; }
+
+    public ImmutableHashSet<string> BoundaryProtectedComponentNames { get; }
 
     public ImmutableHashSet<string> BoundaryProtectedDynamicComponentTypeParameters { get; }
 }

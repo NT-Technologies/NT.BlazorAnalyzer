@@ -4935,6 +4935,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 generatedBoundaryProtectedDynamicComponentTypeParameters.UnionWith(generatedAnalysis.BoundaryProtectedDynamicComponentTypeParameters);
                 if (razorAnalysis is not null)
                 {
+                    foreach (var childComponent in ResolveRazorComponentNames(razorAnalysis.BoundaryProtectedComponentNames, cancellationToken))
+                    {
+                        childComponents.Add(childComponent);
+                        generatedBoundaryProtectedChildComponents.Add(childComponent);
+                    }
+
                     generatedBoundaryProtectedDynamicComponentTypeParameters.UnionWith(razorAnalysis.BoundaryProtectedDynamicComponentTypeParameters);
                 }
             }
@@ -4976,6 +4982,27 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 generatedBoundaryProtectedDynamicComponentTypeParameters.ToImmutable(),
                 uncoveredRegions.ToImmutable(),
                 boundaryRootLocation);
+        }
+
+        private IEnumerable<INamedTypeSymbol> ResolveRazorComponentNames(
+            IEnumerable<string> componentNames,
+            CancellationToken cancellationToken)
+        {
+            var seen = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+            foreach (var componentName in componentNames)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var symbol in compilation.GetSymbolsWithName(name => string.Equals(name, componentName, StringComparison.Ordinal), SymbolFilter.Type, cancellationToken))
+                {
+                    if (symbol is INamedTypeSymbol componentType &&
+                        IsComponent(componentType, componentBaseSymbol) &&
+                        !IsIgnoredRootComponent(componentType) &&
+                        seen.Add(componentType))
+                    {
+                        yield return componentType;
+                    }
+                }
+            }
         }
 
         private void AddDynamicBoundaryProtectedComponentOwners(

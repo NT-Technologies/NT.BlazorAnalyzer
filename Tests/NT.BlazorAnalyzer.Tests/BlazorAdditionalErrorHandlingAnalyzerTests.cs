@@ -132,6 +132,56 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
     }
 
     [Fact]
+    public async Task LifecycleMethod_WithOnlyRazorMarkupBoundaryProtectedStaticUsages_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            sources:
+            [
+                TestComponentSources.CreateStaticComponent(
+                    componentName: "LifecycleComponent",
+                    renderTreeStatements: """
+                        __builder.OpenElement(0, "div");
+                        __builder.CloseElement();
+                        """,
+                    razorMethods: """
+                        private DataService Service { get; } = new();
+
+                        protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                        {
+                            await Service.LoadAsync();
+                        }
+
+                        private sealed class DataService
+                        {
+                            public async global::System.Threading.Tasks.Task LoadAsync()
+                            {
+                                await global::System.Threading.Tasks.Task.Yield();
+                                throw new global::System.InvalidOperationException();
+                            }
+                        }
+                        """),
+                TestComponentSources.CreateInteractiveComponent(
+                    componentName: "Page",
+                    renderTreeStatements: """
+                        __builder.OpenElement(0, "section");
+                        __builder.CloseElement();
+                        """)
+            ],
+            additionalFiles:
+            [
+                TestComponentSources.CreateRazorMarkup(
+                    componentName: "Page",
+                    markup: """
+                        <ErrorBoundary>
+                            <LifecycleComponent />
+                        </ErrorBoundary>
+                        """)
+            ]);
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
     public async Task LifecycleMethod_WithOnlyRootBoundaryProtectedRenderBuilderHelperUsages_DoesNotReportNtba0003()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
