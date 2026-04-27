@@ -55,7 +55,7 @@ Diagnostic text:
 
 ### `NTBA0003`
 
-Warning when an interactive lifecycle method performs failure-prone work without meaningful exception handling.
+Warning when an interactive lifecycle method performs failure-prone work without meaningful exception handling or known owner `ErrorBoundary` coverage.
 
 Covered lifecycle methods:
 - `OnInitialized`
@@ -68,6 +68,10 @@ Covered lifecycle methods:
 
 Notes:
 - early lifecycle methods are treated as the highest-risk surface because unhandled failures can break prerendering or circuit initialization
+- a component's own root `ErrorBoundary` does not protect that component's lifecycle method; the component must be rendered by an owner that is already covered
+- if every known static owner path renders the component inside `ErrorBoundary`, local lifecycle `try/catch` is not required
+- root-boundary coverage can flow through local `RenderTreeBuilder` helper methods, protected concrete derived component usages, and `DynamicComponent` dialog hosts whose type slot is inside a known `ErrorBoundary`
+- custom boundary tags are trusted only when the component type is known to inherit `ErrorBoundary`, including boundaries from referenced assemblies
 - pure delegation to a safe local helper is accepted
 - trivial local state mutation alone does not trigger `NTBA0003`
 - a swallowed catch can still trigger `NTBA0003` alongside `NTBA0008`

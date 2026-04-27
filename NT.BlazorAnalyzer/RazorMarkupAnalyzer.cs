@@ -28,6 +28,7 @@ internal static class RazorMarkupAnalyzer
         Location? boundaryRootLocation = null;
         var htmlInteractiveRegions = ImmutableArray.CreateBuilder<RazorMarkupRegion>();
         var componentRoots = ImmutableArray.CreateBuilder<RazorComponentRoot>();
+        var boundaryProtectedDynamicComponentTypeParameters = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
 
         for (var index = 0; index < text.Length;)
         {
@@ -119,6 +120,13 @@ internal static class RazorMarkupAnalyzer
                 hasBoundaryProtectedContent = true;
             }
 
+            if (activeBoundaryCount > 0 &&
+                string.Equals(GetSimpleTagName(tag.Name), "DynamicComponent", StringComparison.Ordinal) &&
+                TryGetAttributeValue(tag.Attributes, "Type") is { } dynamicComponentTypeParameter)
+            {
+                boundaryProtectedDynamicComponentTypeParameters.Add(dynamicComponentTypeParameter.TrimStart('@'));
+            }
+
             if (!tag.IsSelfClosing)
             {
                 stack.Push(new TagFrame(tag.Name, isBoundary, isIgnoredRoot));
@@ -131,7 +139,8 @@ internal static class RazorMarkupAnalyzer
             boundaryRootIsKeyed: rootBoundaryIsKeyed,
             boundaryRootLocation,
             htmlInteractiveRegions: htmlInteractiveRegions.ToImmutable(),
-            componentRoots: componentRoots.ToImmutable());
+            componentRoots: componentRoots.ToImmutable(),
+            boundaryProtectedDynamicComponentTypeParameters: boundaryProtectedDynamicComponentTypeParameters.ToImmutable());
     }
 
     private static bool StartsWith(string text, int index, string value) =>
@@ -364,7 +373,7 @@ internal static class RazorMarkupAnalyzer
             }
 
             var name = text.Substring(attributeStart, index - attributeStart);
-            attributes.Add(new ParsedAttribute(name, new TextSpan(attributeStart, index - attributeStart)));
+            var nameSpan = new TextSpan(attributeStart, index - attributeStart);
 
             while (index < endIndex && char.IsWhiteSpace(text[index]))
             {
@@ -373,6 +382,7 @@ internal static class RazorMarkupAnalyzer
 
             if (index >= endIndex || text[index] != '=')
             {
+                attributes.Add(new ParsedAttribute(name, nameSpan, value: null));
                 continue;
             }
 
@@ -384,16 +394,21 @@ internal static class RazorMarkupAnalyzer
 
             if (index >= endIndex)
             {
+                attributes.Add(new ParsedAttribute(name, nameSpan, value: null));
                 break;
             }
 
             if (text[index] is '"' or '\'')
             {
                 var quote = text[index++];
+                var valueStart = index;
+                var valueAdded = false;
                 while (index < endIndex)
                 {
                     if (text[index] == quote)
                     {
+                        attributes.Add(new ParsedAttribute(name, nameSpan, text.Substring(valueStart, index - valueStart)));
+                        valueAdded = true;
                         index++;
                         break;
                     }
@@ -401,10 +416,16 @@ internal static class RazorMarkupAnalyzer
                     index++;
                 }
 
+                if (!valueAdded)
+                {
+                    attributes.Add(new ParsedAttribute(name, nameSpan, text.Substring(valueStart, index - valueStart)));
+                }
+
                 continue;
             }
 
             var depth = 0;
+            var unquotedValueStart = index;
             while (index < endIndex)
             {
                 var current = text[index];
@@ -423,6 +444,8 @@ internal static class RazorMarkupAnalyzer
 
                 index++;
             }
+
+            attributes.Add(new ParsedAttribute(name, nameSpan, text.Substring(unquotedValueStart, index - unquotedValueStart)));
         }
 
         return attributes.ToImmutable();
@@ -495,6 +518,19 @@ internal static class RazorMarkupAnalyzer
     private static bool HasKeyDirective(ImmutableArray<ParsedAttribute> attributes) =>
         attributes.Any(static attribute => attribute.Name.Equals("@key", StringComparison.OrdinalIgnoreCase));
 
+    private static string? TryGetAttributeValue(ImmutableArray<ParsedAttribute> attributes, string attributeName)
+    {
+        foreach (var attribute in attributes)
+        {
+            if (attribute.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase))
+            {
+                return attribute.Value;
+            }
+        }
+
+        return null;
+    }
+
     private static bool IsBoundaryTag(string tagName, ImmutableHashSet<string> boundaryComponentNames)
     {
         var simpleTagName = GetSimpleTagName(tagName);
@@ -551,15 +587,18 @@ internal static class RazorMarkupAnalyzer
 
     private readonly struct ParsedAttribute
     {
-        public ParsedAttribute(string name, TextSpan nameSpan)
+        public ParsedAttribute(string name, TextSpan nameSpan, string? value)
         {
             Name = name;
             NameSpan = nameSpan;
+            Value = value;
         }
 
         public string Name { get; }
 
         public TextSpan NameSpan { get; }
+
+        public string? Value { get; }
     }
 
     private readonly struct TagFrame
@@ -588,6 +627,25 @@ internal sealed class RazorMarkupAnalysis
         Location? boundaryRootLocation,
         ImmutableArray<RazorMarkupRegion> htmlInteractiveRegions,
         ImmutableArray<RazorComponentRoot> componentRoots)
+        : this(
+            hasBoundaryRoot,
+            boundaryRootHasErrorContent,
+            boundaryRootIsKeyed,
+            boundaryRootLocation,
+            htmlInteractiveRegions,
+            componentRoots,
+            ImmutableHashSet<string>.Empty)
+    {
+    }
+
+    public RazorMarkupAnalysis(
+        bool hasBoundaryRoot,
+        bool boundaryRootHasErrorContent,
+        bool boundaryRootIsKeyed,
+        Location? boundaryRootLocation,
+        ImmutableArray<RazorMarkupRegion> htmlInteractiveRegions,
+        ImmutableArray<RazorComponentRoot> componentRoots,
+        ImmutableHashSet<string> boundaryProtectedDynamicComponentTypeParameters)
     {
         HasBoundaryRoot = hasBoundaryRoot;
         BoundaryRootHasErrorContent = boundaryRootHasErrorContent;
@@ -595,6 +653,7 @@ internal sealed class RazorMarkupAnalysis
         BoundaryRootLocation = boundaryRootLocation;
         HtmlInteractiveRegions = htmlInteractiveRegions;
         ComponentRoots = componentRoots;
+        BoundaryProtectedDynamicComponentTypeParameters = boundaryProtectedDynamicComponentTypeParameters;
     }
 
     public bool HasBoundaryRoot { get; }
@@ -608,6 +667,8 @@ internal sealed class RazorMarkupAnalysis
     public ImmutableArray<RazorMarkupRegion> HtmlInteractiveRegions { get; }
 
     public ImmutableArray<RazorComponentRoot> ComponentRoots { get; }
+
+    public ImmutableHashSet<string> BoundaryProtectedDynamicComponentTypeParameters { get; }
 }
 
 internal readonly struct RazorMarkupRegion

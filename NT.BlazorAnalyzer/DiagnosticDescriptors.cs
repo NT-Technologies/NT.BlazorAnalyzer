@@ -28,12 +28,12 @@ internal static class DiagnosticDescriptors
 
     public static readonly DiagnosticDescriptor LifecycleMissingTryCatch = new(
         id: "NTBA0003",
-        title: "Lifecycle method should use meaningful exception handling",
-        messageFormat: "{2} lifecycle method '{0}' in interactive component '{1}' performs failure-prone work without meaningful exception handling",
+        title: "Lifecycle method should use meaningful exception handling or owner ErrorBoundary coverage",
+        messageFormat: "{2} lifecycle method '{0}' in interactive component '{1}' performs failure-prone work without meaningful exception handling or owner ErrorBoundary coverage",
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "Failure-prone interactive Blazor lifecycle methods should use meaningful exception handling. Early lifecycle failures are especially risky during prerendering and circuit initialization, and delegation to a safe handler is acceptable.");
+        description: "Failure-prone interactive Blazor lifecycle methods should use meaningful exception handling or be rendered only through known owner components that are covered by ErrorBoundary. Early lifecycle failures are especially risky during prerendering and circuit initialization, and delegation to a safe handler is acceptable.");
 
     public static readonly DiagnosticDescriptor DisposeMissingTryCatch = new(
         id: "NTBA0004",

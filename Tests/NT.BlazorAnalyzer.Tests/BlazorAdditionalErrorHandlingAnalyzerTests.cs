@@ -34,6 +34,504 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
     }
 
     [Fact]
+    public async Task LifecycleMethod_WithOnlyBoundaryProtectedStaticUsages_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "LifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private DataService Service { get; } = new();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        await Service.LoadAsync();
+                    }
+
+                    private sealed class DataService
+                    {
+                        public async global::System.Threading.Tasks.Task LoadAsync()
+                        {
+                            await global::System.Threading.Tasks.Task.Yield();
+                            throw new global::System.InvalidOperationException();
+                        }
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.LifecycleComponent>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithOnlyNestedBoundaryProtectedStaticUsages_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "LifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private DataService Service { get; } = new();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        await Service.LoadAsync();
+                    }
+
+                    private sealed class DataService
+                    {
+                        public async global::System.Threading.Tasks.Task LoadAsync()
+                        {
+                            await global::System.Threading.Tasks.Task.Yield();
+                            throw new global::System.InvalidOperationException();
+                        }
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "section");
+                    __builder.OpenElement(1, "h1");
+                    __builder.CloseElement();
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(2);
+                    __builder.AddAttribute(3, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.LifecycleComponent>(4);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(5, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(6, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    __builder.CloseElement();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithOnlyRootBoundaryProtectedRenderBuilderHelperUsages_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "LifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private DataService Service { get; } = new();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        await Service.LoadAsync();
+                    }
+
+                    private sealed class DataService
+                    {
+                        public async global::System.Threading.Tasks.Task LoadAsync()
+                        {
+                            await global::System.Threading.Tasks.Task.Yield();
+                            throw new global::System.InvalidOperationException();
+                        }
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/Page.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        [Page.__PrivateComponentRenderModeAttribute]
+                        public partial class Page : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                                __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                                {
+                                    RenderPageContent(__builder2);
+                                }));
+                                __builder.AddAttribute(2, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                                {
+                                    __builder3.OpenElement(3, "p");
+                                    __builder3.CloseElement();
+                                }));
+                                __builder.CloseComponent();
+                            }
+
+                            protected void RenderPageContent(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenComponent<global::TestComponents.LifecycleComponent>(4);
+                                __builder.CloseComponent();
+                            }
+
+                            private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                            {
+                                public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                    global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer;
+                            }
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task AbstractLifecycleMethod_WithOnlyBoundaryProtectedConcreteDerivedUsages_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            new SourceFile(
+                Path: "Components/BaseLifecycleComponent.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        public abstract partial class BaseLifecycleComponent : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            private DataService Service { get; } = new();
+
+                            protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                            {
+                                await Service.LoadAsync();
+                            }
+
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenElement(0, "div");
+                                __builder.CloseElement();
+                            }
+
+                            private sealed class DataService
+                            {
+                                public async global::System.Threading.Tasks.Task LoadAsync()
+                                {
+                                    await global::System.Threading.Tasks.Task.Yield();
+                                    throw new global::System.InvalidOperationException();
+                                }
+                            }
+                        }
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/ConcreteLifecycleComponent.cs",
+                Text: """
+                    namespace TestComponents;
+
+                    [ConcreteLifecycleComponent.__PrivateComponentRenderModeAttribute]
+                    public sealed class ConcreteLifecycleComponent : BaseLifecycleComponent
+                    {
+                        private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                        {
+                            public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer;
+                        }
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.ConcreteLifecycleComponent>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task GenericAbstractLifecycleMethod_WithOnlyBoundaryProtectedClassOnlyDerivedUsages_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            new SourceFile(
+                Path: "Components/GenericLifecycleComponent.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        public abstract partial class GenericLifecycleComponent<TItem, TKey> : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            private DataService Service { get; } = new();
+
+                            protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                            {
+                                await Service.LoadAsync();
+                            }
+
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenElement(0, "div");
+                                __builder.CloseElement();
+                            }
+
+                            private sealed class DataService
+                            {
+                                public async global::System.Threading.Tasks.Task LoadAsync()
+                                {
+                                    await global::System.Threading.Tasks.Task.Yield();
+                                    throw new global::System.InvalidOperationException();
+                                }
+                            }
+                        }
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/ConcreteLifecycleComponent.cs",
+                Text: """
+                    namespace TestComponents;
+
+                    [ConcreteLifecycleComponent.__PrivateComponentRenderModeAttribute]
+                    public sealed class ConcreteLifecycleComponent : GenericLifecycleComponent<string, int>
+                    {
+                        private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                        {
+                            public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer;
+                        }
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.ConcreteLifecycleComponent>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithOnlyDialogDynamicComponentBoundaryProtectedUsages_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "DynamicForm",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private DataService Service { get; } = new();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        await Service.LoadAsync();
+                    }
+
+                    private sealed class DataService
+                    {
+                        public async global::System.Threading.Tasks.Task LoadAsync()
+                        {
+                            await global::System.Threading.Tasks.Task.Yield();
+                            throw new global::System.InvalidOperationException();
+                        }
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/FormDialog.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        public partial class FormDialog : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            [global::Microsoft.AspNetCore.Components.Parameter]
+                            public global::System.Type FormComponentType { get; set; } = default!;
+
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                                __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                                {
+                                    __builder2.OpenComponent<global::Microsoft.AspNetCore.Components.DynamicComponent>(2);
+                                    __builder2.AddAttribute(3, "Type", FormComponentType);
+                                    __builder2.CloseComponent();
+                                }));
+                                __builder.AddAttribute(4, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                                {
+                                    __builder3.OpenElement(5, "p");
+                                    __builder3.CloseElement();
+                                }));
+                                __builder.CloseComponent();
+                            }
+                        }
+                    }
+                    """),
+            new SourceFile(
+                Path: "Components/DialogLauncher.razor.g.cs",
+                Text: """
+                    namespace TestComponents
+                    {
+                        [DialogLauncher.__PrivateComponentRenderModeAttribute]
+                        public partial class DialogLauncher : global::Microsoft.AspNetCore.Components.ComponentBase
+                        {
+                            private DialogService Dialog { get; } = new();
+
+                            protected override void BuildRenderTree(global::Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder __builder)
+                            {
+                                __builder.OpenElement(0, "button");
+                                __builder.AddAttribute(1, "onclick", global::Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this, OpenDialogAsync));
+                                __builder.CloseElement();
+                            }
+
+                            private global::System.Threading.Tasks.Task OpenDialogAsync() =>
+                                Dialog.OpenAsync<FormDialog>(new()
+                                {
+                                    { nameof(FormDialog.FormComponentType), typeof(DynamicForm) }
+                                });
+
+                            private sealed class DialogService
+                            {
+                                public global::System.Threading.Tasks.Task OpenAsync<TComponent>(global::System.Collections.Generic.Dictionary<string, object?> parameters)
+                                    where TComponent : global::Microsoft.AspNetCore.Components.IComponent =>
+                                    global::System.Threading.Tasks.Task.CompletedTask;
+                            }
+
+                            private sealed class __PrivateComponentRenderModeAttribute : global::Microsoft.AspNetCore.Components.RenderModeAttribute
+                            {
+                                public override global::Microsoft.AspNetCore.Components.IComponentRenderMode Mode =>
+                                    global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer;
+                            }
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithOnlySelfBoundaryRoot_ReportsNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "LifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenElement(2, "div");
+                        __builder2.CloseElement();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """,
+                razorMethods: """
+                    private DataService Service { get; } = new();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        await Service.LoadAsync();
+                    }
+
+                    private sealed class DataService
+                    {
+                        public async global::System.Threading.Tasks.Task LoadAsync()
+                        {
+                            await global::System.Threading.Tasks.Task.Yield();
+                            throw new global::System.InvalidOperationException();
+                        }
+                    }
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithMixedBoundaryProtectedAndUnprotectedStaticUsages_ReportsNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateStaticComponent(
+                componentName: "LifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private DataService Service { get; } = new();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        await Service.LoadAsync();
+                    }
+
+                    private sealed class DataService
+                    {
+                        public async global::System.Threading.Tasks.Task LoadAsync()
+                        {
+                            await global::System.Threading.Tasks.Task.Yield();
+                            throw new global::System.InvalidOperationException();
+                        }
+                    }
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "WrappedPage",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.LifecycleComponent>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "UnwrappedPage",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.LifecycleComponent>(0);
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
     public async Task LifecycleMethod_WithOnlyTrivialLocalStateMutation_DoesNotReportNtba0003()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
@@ -147,6 +645,26 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
     }
 
     [Fact]
+    public async Task LifecycleMethod_WithOnlyBaseSetParametersAsync_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "BaseSetParametersLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    public override async global::System.Threading.Tasks.Task SetParametersAsync(global::Microsoft.AspNetCore.Components.ParameterView parameters)
+                    {
+                        await base.SetParametersAsync(parameters);
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
     public async Task LifecycleMethod_DelegatingToSafeHelper_DoesNotReportNtba0003()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
@@ -189,6 +707,140 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     """));
 
         Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithBaseCallAndSafeHelper_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "BaseCallDelegatedLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private Logger Logger { get; } = new Logger();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        await base.OnInitializedAsync();
+                        await RunSafelyAsync();
+                    }
+
+                    private async global::System.Threading.Tasks.Task RunSafelyAsync()
+                    {
+                        try
+                        {
+                            await LoadAsync();
+                        }
+                        catch (global::System.Exception ex)
+                        {
+                            Logger.LogError(ex);
+                        }
+                    }
+
+                    private async global::System.Threading.Tasks.Task LoadAsync()
+                    {
+                        await global::System.Threading.Tasks.Task.Yield();
+                        throw new global::System.InvalidOperationException();
+                    }
+
+                    private sealed class Logger
+                    {
+                        public void LogError(global::System.Exception ex)
+                        {
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithOnlyMeaningfulTryCatch_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "HandledLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private DataService Service { get; } = new();
+                    private Logger Logger { get; } = new Logger();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        try
+                        {
+                            await Service.LoadAsync();
+                        }
+                        catch (global::System.Exception ex)
+                        {
+                            Logger.LogError(ex);
+                        }
+                    }
+
+                    private sealed class DataService
+                    {
+                        public global::System.Threading.Tasks.Task LoadAsync() => global::System.Threading.Tasks.Task.CompletedTask;
+                    }
+
+                    private sealed class Logger
+                    {
+                        public void LogError(global::System.Exception ex)
+                        {
+                        }
+                    }
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_WithHandledAndUnhandledFailureProneWork_ReportsNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "PartiallyHandledLifecycleComponent",
+                renderTreeStatements: """
+                    __builder.OpenElement(0, "div");
+                    __builder.CloseElement();
+                    """,
+                razorMethods: """
+                    private DataService Service { get; } = new();
+                    private Logger Logger { get; } = new Logger();
+
+                    protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                    {
+                        try
+                        {
+                            await Service.LoadAsync();
+                        }
+                        catch (global::System.Exception ex)
+                        {
+                            Logger.LogError(ex);
+                        }
+
+                        await Service.LoadAsync();
+                    }
+
+                    private sealed class DataService
+                    {
+                        public global::System.Threading.Tasks.Task LoadAsync() => global::System.Threading.Tasks.Task.CompletedTask;
+                    }
+
+                    private sealed class Logger
+                    {
+                        public void LogError(global::System.Exception ex)
+                        {
+                        }
+                    }
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
     }
 
     [Fact]

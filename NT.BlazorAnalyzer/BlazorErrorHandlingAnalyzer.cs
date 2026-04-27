@@ -58,6 +58,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             var buildRenderTreeRootMethods = new ConcurrentDictionary<IMethodSymbol, byte>(SymbolEqualityComparer.Default);
             var methodAnalyses = new ConcurrentDictionary<IMethodSymbol, MethodAnalysis>(SymbolEqualityComparer.Default);
             var boundaryComponentNames = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+            foreach (var boundaryComponentName in GetBoundaryComponentNames(compilationStartContext.Compilation, errorBoundarySymbol))
+            {
+                boundaryComponentNames.TryAdd(boundaryComponentName, 0);
+            }
+
             var componentRenderAnalyses = new ConcurrentDictionary<INamedTypeSymbol, ComponentRenderAnalysis>(SymbolEqualityComparer.Default);
             var locallyReportedMissingErrorBoundaryComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var locallyReportedBoundaryMissingErrorContentComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
@@ -113,7 +118,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     ReportLocalLifecycleTryCatchDiagnostics(
                         symbolEndContext,
                         componentSymbol,
-                        localMethodAnalyses);
+                        localMethodAnalyses,
+                        boundaryCoverageResolver);
 
                     ReportLocalLifecycleJsInteropGuardDiagnostics(
                         symbolEndContext,
@@ -513,8 +519,14 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static void ReportLocalLifecycleTryCatchDiagnostics(
         SymbolAnalysisContext context,
         INamedTypeSymbol componentSymbol,
-        ConcurrentDictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses)
+        ConcurrentDictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses,
+        BoundaryCoverageResolver boundaryCoverageResolver)
     {
+        if (boundaryCoverageResolver.IsLifecycleBoundaryProtected(componentSymbol, context.CancellationToken))
+        {
+            return;
+        }
+
         foreach (var method in localMethodAnalyses.Keys
                      .Distinct<IMethodSymbol>(SymbolEqualityComparer.Default)
                      .OrderBy(static method => method.GetPreferredSourceLocation().TryGetStartLine() ?? int.MaxValue))
@@ -982,6 +994,93 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             SymbolEqualityComparer.Default);
     }
 
+    private static HashSet<INamedTypeSymbol> ComputeLifecycleBoundaryProtectedComponents(
+        IReadOnlyDictionary<INamedTypeSymbol, ImmutableHashSet<string>> effectiveRenderModes,
+        IReadOnlyDictionary<INamedTypeSymbol, ImmutableHashSet<string>> protectedRenderModes,
+        ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners,
+        ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> boundaryProtectedComponentOwners)
+    {
+        var allComponentSet = new HashSet<INamedTypeSymbol>(effectiveRenderModes.Keys, SymbolEqualityComparer.Default);
+        var protectedComponents = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+
+        foreach (var component in allComponentSet)
+        {
+            if (!componentOwners.TryGetValue(component, out var owners) || owners.IsEmpty)
+            {
+                continue;
+            }
+
+            var actionableOwners = GetConcreteComponents(owners.Keys, allComponentSet).ToArray();
+            if (actionableOwners.Length == 0)
+            {
+                continue;
+            }
+
+            var allRenderModesCovered = true;
+            boundaryProtectedComponentOwners.TryGetValue(component, out var boundaryProtectedOwners);
+            foreach (var renderMode in effectiveRenderModes[component])
+            {
+                var renderModeCovered = true;
+                foreach (var owner in actionableOwners)
+                {
+                    if (!effectiveRenderModes.TryGetValue(owner, out var ownerRenderModes) ||
+                        !ownerRenderModes.Contains(renderMode) ||
+                        !(boundaryProtectedOwners?.ContainsKey(owner) == true ||
+                          (protectedRenderModes.TryGetValue(owner, out var ownerProtectedRenderModes) &&
+                           ownerProtectedRenderModes.Contains(renderMode))))
+                    {
+                        renderModeCovered = false;
+                        break;
+                    }
+                }
+
+                if (!renderModeCovered)
+                {
+                    allRenderModesCovered = false;
+                    break;
+                }
+            }
+
+            if (allRenderModesCovered)
+            {
+                protectedComponents.Add(component);
+            }
+        }
+
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+
+            foreach (var component in allComponentSet.Where(static component => component.IsAbstract))
+            {
+                if (protectedComponents.Contains(component))
+                {
+                    continue;
+                }
+
+                var concreteDerivedComponents = allComponentSet
+                    .Where(candidate =>
+                        !candidate.IsAbstract &&
+                        !SymbolEqualityComparer.Default.Equals(candidate, component) &&
+                        candidate.InheritsFromOrEquals(component))
+                    .ToArray();
+
+                if (concreteDerivedComponents.Length == 0)
+                {
+                    continue;
+                }
+
+                if (concreteDerivedComponents.All(protectedComponents.Contains))
+                {
+                    changed |= protectedComponents.Add(component);
+                }
+            }
+        }
+
+        return protectedComponents;
+    }
+
     private static Dictionary<INamedTypeSymbol, ImmutableArray<INamedTypeSymbol>> ComputeSuggestedBoundaryResolvers(
         IEnumerable<INamedTypeSymbol> relevantComponents,
         IReadOnlyDictionary<INamedTypeSymbol, ImmutableHashSet<string>> effectiveRenderModes,
@@ -1256,6 +1355,54 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return builder.ToImmutable();
     }
 
+    private static ImmutableHashSet<string> GetBoundaryComponentNames(Compilation compilation, INamedTypeSymbol errorBoundarySymbol)
+    {
+        var builder = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
+        AddBoundaryComponentNames(compilation.Assembly.GlobalNamespace, errorBoundarySymbol, builder);
+        foreach (var referencedAssembly in compilation.SourceModule.ReferencedAssemblySymbols)
+        {
+            AddBoundaryComponentNames(referencedAssembly.GlobalNamespace, errorBoundarySymbol, builder);
+        }
+
+        return builder.ToImmutable();
+    }
+
+    private static void AddBoundaryComponentNames(
+        INamespaceSymbol namespaceSymbol,
+        INamedTypeSymbol errorBoundarySymbol,
+        ImmutableHashSet<string>.Builder builder)
+    {
+        foreach (var member in namespaceSymbol.GetMembers())
+        {
+            if (member is INamespaceSymbol nestedNamespace)
+            {
+                AddBoundaryComponentNames(nestedNamespace, errorBoundarySymbol, builder);
+                continue;
+            }
+
+            if (member is INamedTypeSymbol namedType)
+            {
+                AddBoundaryComponentNames(namedType, errorBoundarySymbol, builder);
+            }
+        }
+    }
+
+    private static void AddBoundaryComponentNames(
+        INamedTypeSymbol namedType,
+        INamedTypeSymbol errorBoundarySymbol,
+        ImmutableHashSet<string>.Builder builder)
+    {
+        if (namedType.TypeKind == TypeKind.Class && namedType.InheritsFromOrEquals(errorBoundarySymbol))
+        {
+            builder.Add(namedType.Name);
+        }
+
+        foreach (var nestedType in namedType.GetTypeMembers())
+        {
+            AddBoundaryComponentNames(nestedType, errorBoundarySymbol, builder);
+        }
+    }
+
     private static RazorMarkupAnalysis? TryGetRazorMarkupAnalysis(
         MethodDeclarationSyntax methodDeclaration,
         IMethodSymbol methodSymbol,
@@ -1504,6 +1651,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         var unguardedJsInteropCallees = ImmutableHashSet.CreateBuilder<IMethodSymbol>(SymbolEqualityComparer.Default);
+        var unhandledFailureProneCallees = ImmutableHashSet.CreateBuilder<IMethodSymbol>(SymbolEqualityComparer.Default);
         foreach (var invocation in GetLocalMemberInvocations(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken))
         {
             if (IsWithinInteractivityGuard(invocation, semanticModel, methodSymbol.ContainingType, cancellationToken))
@@ -1515,6 +1663,20 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             if (callee is not null)
             {
                 unguardedJsInteropCallees.Add(callee);
+            }
+        }
+
+        foreach (var invocation in GetLocalMemberInvocations(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken))
+        {
+            if (IsFailureProneOperationMeaningfullyHandled(invocation, semanticModel, cancellationToken))
+            {
+                continue;
+            }
+
+            var callee = GetInvokedMemberMethod(invocation, semanticModel, methodSymbol.ContainingType, cancellationToken);
+            if (callee is not null)
+            {
+                unhandledFailureProneCallees.Add(callee);
             }
         }
 
@@ -1538,9 +1700,16 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 methodSymbol.ContainingType,
                 treatExplicitThrowsAsFailureProne: !IsLifecycleMethod(methodSymbol),
                 cancellationToken),
+            hasUnhandledFailureProneOperation: HasUnhandledFailureProneOperation(
+                methodDeclaration,
+                semanticModel,
+                methodSymbol.ContainingType,
+                treatExplicitThrowsAsFailureProne: !IsLifecycleMethod(methodSymbol),
+                cancellationToken),
             hasJsInteropCalls: jsInteropCalls.Length > 0,
             hasUnhandledJsInteropCalls: unhandledJsInteropCalls.Length > 0,
             hasUnguardedJsInteropCalls: jsInteropCalls.Any(call => !IsWithinInteractivityGuard(call, semanticModel, methodSymbol.ContainingType, cancellationToken)),
+            unhandledFailureProneCallees: unhandledFailureProneCallees.ToImmutable(),
             unguardedJsInteropCallees: unguardedJsInteropCallees.ToImmutable(),
             isAsyncVoid: IsAsyncVoid(methodDeclaration, methodSymbol),
             catchWithoutLoggingLocations: GetCatchWithoutLoggingLocations(methodDeclaration, semanticModel, cancellationToken));
@@ -1603,6 +1772,43 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
                 case InvocationExpressionSyntax invocation
                     when IsFailureProneInvocation(invocation, semanticModel, containingType, cancellationToken, isAwaited: false):
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasUnhandledFailureProneOperation(
+        MethodDeclarationSyntax methodDeclaration,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        bool treatExplicitThrowsAsFailureProne,
+        CancellationToken cancellationToken)
+    {
+        var rootNode = GetMethodExecutableRoot(methodDeclaration);
+        if (rootNode is null)
+        {
+            return false;
+        }
+
+        foreach (var node in rootNode.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node)))
+        {
+            switch (node)
+            {
+                case ThrowStatementSyntax when treatExplicitThrowsAsFailureProne && !IsFailureProneOperationMeaningfullyHandled(node, semanticModel, cancellationToken):
+                case ThrowExpressionSyntax when treatExplicitThrowsAsFailureProne && !IsFailureProneOperationMeaningfullyHandled(node, semanticModel, cancellationToken):
+                    return true;
+
+                case AwaitExpressionSyntax awaitExpression
+                    when IsFailureProneAwaitExpression(awaitExpression, semanticModel, containingType, cancellationToken) &&
+                         !IsFailureProneOperationMeaningfullyHandled(awaitExpression, semanticModel, cancellationToken):
+                    return true;
+
+                case InvocationExpressionSyntax invocation
+                    when invocation.Ancestors().OfType<AwaitExpressionSyntax>().FirstOrDefault() is null &&
+                         IsFailureProneInvocation(invocation, semanticModel, containingType, cancellationToken, isAwaited: false) &&
+                         !IsFailureProneOperationMeaningfullyHandled(invocation, semanticModel, cancellationToken):
                     return true;
             }
         }
@@ -1679,7 +1885,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static bool IsKnownLowRiskInvocation(InvocationExpressionSyntax invocation, IMethodSymbol methodSymbol)
     {
         if (invocation.Expression is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax } &&
-            methodSymbol.Name is "OnInitialized" or "OnInitializedAsync" or "OnParametersSet" or "OnParametersSetAsync" or "OnAfterRender" or "OnAfterRenderAsync")
+            methodSymbol.Name is "OnInitialized" or "OnInitializedAsync" or "OnParametersSet" or "OnParametersSetAsync" or "OnAfterRender" or "OnAfterRenderAsync" or "SetParametersAsync")
         {
             return true;
         }
@@ -1863,14 +2069,13 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 return false;
             }
 
-            if (analysis.HasTryCatch)
+            if (analysis.HasUnhandledFailureProneOperation)
             {
-                var meaningfulHandling = analysis.CatchWithoutLoggingLocations.IsEmpty;
-                effectiveHandlingCache[currentMethod] = meaningfulHandling;
-                return meaningfulHandling;
+                effectiveHandlingCache[currentMethod] = false;
+                return false;
             }
 
-            if (analysis.DelegatedMethod is null || !visitingEffectiveHandling.Add(currentMethod))
+            if (!visitingEffectiveHandling.Add(currentMethod))
             {
                 effectiveHandlingCache[currentMethod] = false;
                 return false;
@@ -1878,9 +2083,22 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
             try
             {
-                var handled = IsEffectivelyHandled(analysis.DelegatedMethod);
-                effectiveHandlingCache[currentMethod] = handled;
-                return handled;
+                foreach (var callee in analysis.UnhandledFailureProneCallees)
+                {
+                    if (!HasFailurePronePath(callee, methodAnalyses))
+                    {
+                        continue;
+                    }
+
+                    if (!IsEffectivelyHandled(callee))
+                    {
+                        effectiveHandlingCache[currentMethod] = false;
+                        return false;
+                    }
+                }
+
+                effectiveHandlingCache[currentMethod] = true;
+                return true;
             }
             finally
             {
@@ -1910,14 +2128,13 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 return false;
             }
 
-            if (analysis.HasTryCatch)
+            if (analysis.HasUnhandledFailureProneOperation)
             {
-                var meaningfulHandling = analysis.CatchWithoutLoggingLocations.IsEmpty;
-                effectiveHandlingCache[currentMethod] = meaningfulHandling;
-                return meaningfulHandling;
+                effectiveHandlingCache[currentMethod] = false;
+                return false;
             }
 
-            if (analysis.DelegatedMethod is null || !visitingEffectiveHandling.Add(currentMethod))
+            if (!visitingEffectiveHandling.Add(currentMethod))
             {
                 effectiveHandlingCache[currentMethod] = false;
                 return false;
@@ -1925,9 +2142,22 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
             try
             {
-                var handled = IsEffectivelyHandled(analysis.DelegatedMethod);
-                effectiveHandlingCache[currentMethod] = handled;
-                return handled;
+                foreach (var callee in analysis.UnhandledFailureProneCallees)
+                {
+                    if (!HasFailurePronePath(callee, methodAnalyses))
+                    {
+                        continue;
+                    }
+
+                    if (!IsEffectivelyHandled(callee))
+                    {
+                        effectiveHandlingCache[currentMethod] = false;
+                        return false;
+                    }
+                }
+
+                effectiveHandlingCache[currentMethod] = true;
+                return true;
             }
             finally
             {
@@ -2133,12 +2363,109 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             }
         }
 
-        return AnalyzeBuildRenderTreeStatements(
+        var analysis = AnalyzeBuildRenderTreeStatements(
             body.Statements,
             childComponents.ToImmutable(),
             semanticModel,
             errorBoundarySymbol,
             cancellationToken);
+        if (!analysis.HasBoundaryRoot && analysis.RootBoundaryComponent is null)
+        {
+            return analysis;
+        }
+
+        var boundaryProtectedChildComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        boundaryProtectedChildComponents.UnionWith(analysis.BoundaryProtectedChildComponents);
+        var boundaryProtectedDynamicComponentTypeParameters = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
+        boundaryProtectedDynamicComponentTypeParameters.UnionWith(analysis.BoundaryProtectedDynamicComponentTypeParameters);
+        foreach (var dynamicComponentReference in GetBoundaryProtectedDynamicComponentReferences(body, semanticModel, cancellationToken))
+        {
+            if (dynamicComponentReference.ComponentType is not null)
+            {
+                boundaryProtectedChildComponents.Add(dynamicComponentReference.ComponentType);
+                continue;
+            }
+
+            if (dynamicComponentReference.TypeParameterName is not null)
+            {
+                boundaryProtectedDynamicComponentTypeParameters.Add(dynamicComponentReference.TypeParameterName);
+            }
+        }
+
+        return new RenderTreeAnalysis(
+            analysis.HasBoundaryRoot,
+            analysis.BoundaryRootHasErrorContent,
+            analysis.RootBoundaryIsKeyed,
+            analysis.RootBoundaryUsesStaleRouteKey,
+            analysis.RootBoundaryComponent,
+            analysis.ChildComponents,
+            boundaryProtectedChildComponents.ToImmutable(),
+            boundaryProtectedDynamicComponentTypeParameters.ToImmutable(),
+            analysis.UncoveredRegions,
+            analysis.BoundaryRootLocation);
+    }
+
+    private static IEnumerable<DynamicComponentReference> GetBoundaryProtectedDynamicComponentReferences(
+        BlockSyntax body,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        foreach (var invocation in body.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
+        {
+            if (!IsDynamicComponentTypeAttribute(invocation, semanticModel, cancellationToken) ||
+                invocation.ArgumentList.Arguments.Count < 3)
+            {
+                continue;
+            }
+
+            var valueExpression = StripParentheses(invocation.ArgumentList.Arguments[2].Expression);
+            if (TryGetTypeOfComponent(valueExpression, semanticModel, cancellationToken) is { } componentType)
+            {
+                yield return new DynamicComponentReference(componentType, typeParameterName: null);
+                continue;
+            }
+
+            if (TryGetReferencedMemberName(valueExpression) is { } typeParameterName)
+            {
+                yield return new DynamicComponentReference(componentType: null, typeParameterName);
+            }
+        }
+    }
+
+    private static bool IsDynamicComponentTypeAttribute(
+        InvocationExpressionSyntax invocation,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (invocation.Expression is not MemberAccessExpressionSyntax { Name.Identifier.ValueText: "AddAttribute" or "AddComponentParameter" } ||
+            !HasAttributeNamed(invocation, semanticModel, cancellationToken, "Type") ||
+            invocation.Parent is not ExpressionStatementSyntax statement ||
+            statement.Parent is not BlockSyntax block)
+        {
+            return false;
+        }
+
+        var statementIndex = block.Statements.IndexOf(statement);
+        for (var index = statementIndex - 1; index >= 0; index--)
+        {
+            if (block.Statements[index] is not ExpressionStatementSyntax { Expression: InvocationExpressionSyntax previousInvocation } ||
+                previousInvocation.Expression is not MemberAccessExpressionSyntax { Name.Identifier.ValueText: var invocationName })
+            {
+                continue;
+            }
+
+            if (invocationName == "CloseComponent")
+            {
+                return false;
+            }
+
+            if (invocationName == "OpenComponent")
+            {
+                return IsDynamicComponentType(TryGetComponentType(previousInvocation, semanticModel, cancellationToken));
+            }
+        }
+
+        return false;
     }
 
     private static RenderTreeAnalysis AnalyzeBuildRenderTreeStatements(
@@ -2149,6 +2476,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         CancellationToken cancellationToken)
     {
         var uncoveredRegions = ImmutableArray.CreateBuilder<InteractiveRenderRegion>();
+        var boundaryProtectedChildComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        var boundaryProtectedDynamicComponentTypeParameters = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
         var hasBoundaryProtectedContent = false;
         var boundaryRootHasErrorContent = true;
         var rootBoundaryIsKeyed = true;
@@ -2164,6 +2493,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 MergeRenderTreeAnalysis(
                     AnalyzeStatementBranches(ifStatement, childComponents, semanticModel, errorBoundarySymbol, cancellationToken),
                     uncoveredRegions,
+                    boundaryProtectedChildComponents,
+                    boundaryProtectedDynamicComponentTypeParameters,
                     ref hasBoundaryProtectedContent,
                     ref boundaryRootHasErrorContent,
                     ref rootBoundaryIsKeyed,
@@ -2234,6 +2565,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                         rootBoundaryUsesStaleRouteKey |= currentRoot.RootBoundaryUsesStaleRouteKey;
                         rootBoundaryComponent ??= currentRoot.RootBoundaryComponent;
                         uncoveredRegions.AddRange(currentRoot.UncoveredRegions);
+                        boundaryProtectedChildComponents.UnionWith(currentRoot.BoundaryProtectedChildComponents);
+                        boundaryProtectedDynamicComponentTypeParameters.UnionWith(currentRoot.BoundaryProtectedDynamicComponentTypeParameters);
                         boundaryRootLocation ??= currentRoot.RootBoundaryLocation;
                         currentRoot = null;
                     }
@@ -2247,6 +2580,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             MergeRootAnalysisState(
                 currentRoot,
                 uncoveredRegions,
+                boundaryProtectedChildComponents,
+                boundaryProtectedDynamicComponentTypeParameters,
                 ref hasBoundaryProtectedContent,
                 ref boundaryRootHasErrorContent,
                 ref rootBoundaryIsKeyed,
@@ -2263,6 +2598,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             rootBoundaryUsesStaleRouteKey,
             rootBoundaryComponent,
             childComponents,
+            boundaryProtectedChildComponents.ToImmutable(),
+            boundaryProtectedDynamicComponentTypeParameters.ToImmutable(),
             finalizedUncoveredRegions,
             boundaryRootLocation);
     }
@@ -2294,6 +2631,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             cancellationToken);
 
         var uncoveredRegions = ImmutableArray.CreateBuilder<InteractiveRenderRegion>();
+        var boundaryProtectedChildComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        var boundaryProtectedDynamicComponentTypeParameters = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
         var hasBoundaryProtectedContent = false;
         var boundaryRootHasErrorContent = true;
         var rootBoundaryIsKeyed = true;
@@ -2304,6 +2643,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         MergeRenderTreeAnalysis(
             ifAnalysis,
             uncoveredRegions,
+            boundaryProtectedChildComponents,
+            boundaryProtectedDynamicComponentTypeParameters,
             ref hasBoundaryProtectedContent,
             ref boundaryRootHasErrorContent,
             ref rootBoundaryIsKeyed,
@@ -2313,6 +2654,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         MergeRenderTreeAnalysis(
             elseAnalysis,
             uncoveredRegions,
+            boundaryProtectedChildComponents,
+            boundaryProtectedDynamicComponentTypeParameters,
             ref hasBoundaryProtectedContent,
             ref boundaryRootHasErrorContent,
             ref rootBoundaryIsKeyed,
@@ -2328,6 +2671,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             rootBoundaryUsesStaleRouteKey,
             rootBoundaryComponent,
             childComponents,
+            boundaryProtectedChildComponents.ToImmutable(),
+            boundaryProtectedDynamicComponentTypeParameters.ToImmutable(),
             finalizedUncoveredRegions,
             boundaryRootLocation);
     }
@@ -2338,6 +2683,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static void MergeRenderTreeAnalysis(
         RenderTreeAnalysis analysis,
         ImmutableArray<InteractiveRenderRegion>.Builder uncoveredRegions,
+        ImmutableHashSet<INamedTypeSymbol>.Builder boundaryProtectedChildComponents,
+        ImmutableHashSet<string>.Builder boundaryProtectedDynamicComponentTypeParameters,
         ref bool hasBoundaryProtectedContent,
         ref bool boundaryRootHasErrorContent,
         ref bool rootBoundaryIsKeyed,
@@ -2346,6 +2693,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ref Location? boundaryRootLocation)
     {
         uncoveredRegions.AddRange(analysis.UncoveredRegions);
+        boundaryProtectedChildComponents.UnionWith(analysis.BoundaryProtectedChildComponents);
+        boundaryProtectedDynamicComponentTypeParameters.UnionWith(analysis.BoundaryProtectedDynamicComponentTypeParameters);
         hasBoundaryProtectedContent |= analysis.HasBoundaryRoot || analysis.RootBoundaryComponent is not null;
         boundaryRootHasErrorContent &= analysis.BoundaryRootHasErrorContent;
         if (analysis.HasBoundaryRoot || analysis.RootBoundaryComponent is not null)
@@ -2361,6 +2710,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static void MergeRootAnalysisState(
         RootAnalysisState rootAnalysisState,
         ImmutableArray<InteractiveRenderRegion>.Builder uncoveredRegions,
+        ImmutableHashSet<INamedTypeSymbol>.Builder boundaryProtectedChildComponents,
+        ImmutableHashSet<string>.Builder boundaryProtectedDynamicComponentTypeParameters,
         ref bool hasBoundaryProtectedContent,
         ref bool boundaryRootHasErrorContent,
         ref bool rootBoundaryIsKeyed,
@@ -2369,6 +2720,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ref Location? boundaryRootLocation)
     {
         uncoveredRegions.AddRange(rootAnalysisState.UncoveredRegions);
+        boundaryProtectedChildComponents.UnionWith(rootAnalysisState.BoundaryProtectedChildComponents);
+        boundaryProtectedDynamicComponentTypeParameters.UnionWith(rootAnalysisState.BoundaryProtectedDynamicComponentTypeParameters);
         hasBoundaryProtectedContent |= rootAnalysisState.HasBoundaryProtectedContent;
         boundaryRootHasErrorContent &= !rootAnalysisState.HasBoundaryMissingErrorContent;
         rootBoundaryIsKeyed &= rootAnalysisState.RootBoundaryIsKeyed;
@@ -2377,10 +2730,37 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         boundaryRootLocation ??= rootAnalysisState.RootBoundaryLocation;
     }
 
+    private static void MergeRootAnalysisState(
+        RootAnalysisState rootAnalysisState,
+        ImmutableArray<InteractiveRenderRegion>.Builder uncoveredRegions,
+        ref bool hasBoundaryProtectedContent,
+        ref bool boundaryRootHasErrorContent,
+        ref bool rootBoundaryIsKeyed,
+        ref bool rootBoundaryUsesStaleRouteKey,
+        ref INamedTypeSymbol? rootBoundaryComponent,
+        ref Location? boundaryRootLocation)
+    {
+        var boundaryProtectedChildComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        var boundaryProtectedDynamicComponentTypeParameters = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
+        MergeRootAnalysisState(
+            rootAnalysisState,
+            uncoveredRegions,
+            boundaryProtectedChildComponents,
+            boundaryProtectedDynamicComponentTypeParameters,
+            ref hasBoundaryProtectedContent,
+            ref boundaryRootHasErrorContent,
+            ref rootBoundaryIsKeyed,
+            ref rootBoundaryUsesStaleRouteKey,
+            ref rootBoundaryComponent,
+            ref boundaryRootLocation);
+    }
+
     private sealed class RootAnalysisState
     {
         private readonly Stack<NodeFrame> nodeStack = new();
         private readonly ImmutableArray<InteractiveRenderRegion>.Builder uncoveredRegions = ImmutableArray.CreateBuilder<InteractiveRenderRegion>();
+        private readonly ImmutableHashSet<INamedTypeSymbol>.Builder boundaryProtectedChildComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+        private readonly ImmutableHashSet<string>.Builder boundaryProtectedDynamicComponentTypeParameters = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
         private int activeBoundaryCount;
         private bool rootBoundaryMissingErrorContent;
         private bool rootBoundaryHasErrorContent;
@@ -2400,7 +2780,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             RootBoundaryComponent = rootBoundaryComponent;
             RootBoundaryLocation = boundaryRoot ? rootLocation : null;
             rootBoundaryHasErrorContent = rootBoundaryHasBuiltInErrorContent;
-            nodeStack.Push(new NodeFrame(boundaryRoot, isComponent: true, rootLocation, rootName));
+            nodeStack.Push(new NodeFrame(boundaryRoot, isComponent: true, rootLocation, rootName, rootBoundaryComponent));
             activeBoundaryCount = boundaryRoot ? 1 : 0;
             HasBoundaryProtectedContent = boundaryRoot;
         }
@@ -2419,6 +2799,10 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         public ImmutableArray<InteractiveRenderRegion> UncoveredRegions => uncoveredRegions.ToImmutable();
 
+        public ImmutableHashSet<INamedTypeSymbol> BoundaryProtectedChildComponents => boundaryProtectedChildComponents.ToImmutable();
+
+        public ImmutableHashSet<string> BoundaryProtectedDynamicComponentTypeParameters => boundaryProtectedDynamicComponentTypeParameters.ToImmutable();
+
         public bool RootBoundaryIsKeyed => !BoundaryRoot || rootBoundaryIsKeyed;
 
         public bool RootBoundaryUsesStaleRouteKey => BoundaryRoot && rootBoundaryUsesStaleRouteKey;
@@ -2435,7 +2819,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 rootLocation,
                 rootName: elementName);
             state.nodeStack.Clear();
-            state.nodeStack.Push(new NodeFrame(isBoundary: false, isComponent: false, rootLocation, elementName));
+            state.nodeStack.Push(new NodeFrame(isBoundary: false, isComponent: false, rootLocation, elementName, componentType: null));
             return state;
         }
 
@@ -2460,18 +2844,25 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         public void OpenElement(Location location, string? elementName) =>
-            nodeStack.Push(new NodeFrame(isBoundary: false, isComponent: false, rootLocation: location, rootName: elementName));
+            nodeStack.Push(new NodeFrame(isBoundary: false, isComponent: false, rootLocation: location, rootName: elementName, componentType: null));
 
         public void OpenComponent(INamedTypeSymbol? componentType, INamedTypeSymbol errorBoundarySymbol, Location location)
         {
             if (IgnoredRoot || IsIgnoredRootComponent(componentType))
             {
-                nodeStack.Push(new NodeFrame(isBoundary: false, isComponent: true, rootLocation: location, rootName: componentType?.Name));
+                nodeStack.Push(new NodeFrame(isBoundary: false, isComponent: true, rootLocation: location, rootName: componentType?.Name, componentType));
                 return;
             }
 
             var isBoundary = componentType is not null && componentType.InheritsFromOrEquals(errorBoundarySymbol);
-            nodeStack.Push(new NodeFrame(isBoundary, isComponent: true, rootLocation: location, rootName: componentType?.Name));
+            if (activeBoundaryCount != 0 &&
+                componentType is not null &&
+                !isBoundary)
+            {
+                boundaryProtectedChildComponents.Add(componentType);
+            }
+
+            nodeStack.Push(new NodeFrame(isBoundary, isComponent: true, rootLocation: location, rootName: componentType?.Name, componentType));
             if (isBoundary)
             {
                 activeBoundaryCount++;
@@ -2492,12 +2883,18 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 return;
             }
 
-            if (activeBoundaryCount != 0 || nodeStack.Count == 0)
+            if (nodeStack.Count == 0)
             {
                 return;
             }
 
             var currentNode = nodeStack.Peek();
+            if (activeBoundaryCount != 0)
+            {
+                TrackBoundaryProtectedDynamicComponentType(invocation, currentNode, semanticModel, cancellationToken);
+                return;
+            }
+
             if (!currentNode.IsComponent)
             {
                 if (HasEventAttribute(invocation, semanticModel, cancellationToken))
@@ -2585,14 +2982,42 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 rootMethods: rootMethods));
         }
 
+        private void TrackBoundaryProtectedDynamicComponentType(
+            InvocationExpressionSyntax invocation,
+            NodeFrame currentNode,
+            SemanticModel semanticModel,
+            CancellationToken cancellationToken)
+        {
+            if (!currentNode.IsComponent ||
+                !IsDynamicComponentType(currentNode.ComponentType) ||
+                !HasAttributeNamed(invocation, semanticModel, cancellationToken, "Type") ||
+                invocation.ArgumentList.Arguments.Count < 3)
+            {
+                return;
+            }
+
+            var valueExpression = StripParentheses(invocation.ArgumentList.Arguments[2].Expression);
+            if (TryGetTypeOfComponent(valueExpression, semanticModel, cancellationToken) is { } componentType)
+            {
+                boundaryProtectedChildComponents.Add(componentType);
+                return;
+            }
+
+            if (TryGetReferencedMemberName(valueExpression) is { } memberName)
+            {
+                boundaryProtectedDynamicComponentTypeParameters.Add(memberName);
+            }
+        }
+
         private sealed class NodeFrame
         {
-            public NodeFrame(bool isBoundary, bool isComponent, Location rootLocation, string? rootName)
+            public NodeFrame(bool isBoundary, bool isComponent, Location rootLocation, string? rootName, INamedTypeSymbol? componentType)
             {
                 IsBoundary = isBoundary;
                 IsComponent = isComponent;
                 RootLocation = rootLocation;
                 RootName = rootName;
+                ComponentType = componentType;
             }
 
             public bool IsBoundary { get; }
@@ -2602,6 +3027,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             public Location RootLocation { get; }
 
             public string? RootName { get; }
+
+            public INamedTypeSymbol? ComponentType { get; }
 
             public int RecordedInteractiveRegionIndex { get; set; } = -1;
         }
@@ -2617,6 +3044,33 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         var metadataName = componentType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", string.Empty);
         return metadataName is "Microsoft.AspNetCore.Components.Web.PageTitle" or
             "Microsoft.AspNetCore.Components.Web.HeadContent";
+    }
+
+    private static bool IsDynamicComponentType(INamedTypeSymbol? componentType) =>
+        componentType is not null &&
+        componentType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", string.Empty) ==
+        "Microsoft.AspNetCore.Components.DynamicComponent";
+
+    private static INamedTypeSymbol? TryGetTypeOfComponent(
+        ExpressionSyntax expression,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        expression = StripParentheses(expression);
+        return expression is TypeOfExpressionSyntax typeOfExpression
+            ? TryGetTypeInfo(typeOfExpression.Type, semanticModel, cancellationToken)?.Type as INamedTypeSymbol
+            : null;
+    }
+
+    private static string? TryGetReferencedMemberName(ExpressionSyntax expression)
+    {
+        expression = StripParentheses(expression);
+        return expression switch
+        {
+            IdentifierNameSyntax identifierName => identifierName.Identifier.ValueText,
+            MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText,
+            _ => null
+        };
     }
 
     private static bool BoundaryTypeHasBuiltInErrorContent(
@@ -3207,6 +3661,27 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             }
 
             if (IsExpectedJsDisconnectedCleanupCatch(tryStatement, invocation, semanticModel, methodSymbol, cancellationToken))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsFailureProneOperationMeaningfullyHandled(
+        SyntaxNode operation,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        foreach (var tryStatement in operation.Ancestors().OfType<TryStatementSyntax>())
+        {
+            if (!tryStatement.Block.FullSpan.Contains(operation.Span) || tryStatement.Catches.Count == 0)
+            {
+                continue;
+            }
+
+            if (tryStatement.Catches.Any(catchClause => CatchClauseLogsOrRethrows(catchClause, semanticModel, cancellationToken)))
             {
                 return true;
             }
@@ -4279,6 +4754,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         private bool initialized;
         private HashSet<INamedTypeSymbol> relevantComponents = new(SymbolEqualityComparer.Default);
         private HashSet<INamedTypeSymbol> boundaryProtectedComponents = new(SymbolEqualityComparer.Default);
+        private HashSet<INamedTypeSymbol> lifecycleBoundaryProtectedComponents = new(SymbolEqualityComparer.Default);
 
         public BoundaryCoverageResolver(
             Compilation compilation,
@@ -4300,6 +4776,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         {
             EnsureInitialized(cancellationToken);
             return boundaryProtectedComponents.Contains(componentSymbol);
+        }
+
+        public bool IsLifecycleBoundaryProtected(INamedTypeSymbol componentSymbol, CancellationToken cancellationToken)
+        {
+            EnsureInitialized(cancellationToken);
+            return lifecycleBoundaryProtectedComponents.Contains(componentSymbol);
         }
 
         public bool IsRelevantComponent(INamedTypeSymbol componentSymbol, CancellationToken cancellationToken)
@@ -4330,9 +4812,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 var localBoundaryComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
                 var localRelevantBoundaryComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
                 var componentOwners = new ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>>(SymbolEqualityComparer.Default);
+                var boundaryProtectedComponentOwners = new ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>>(SymbolEqualityComparer.Default);
+                var renderTreeAnalyses = new Dictionary<INamedTypeSymbol, RenderTreeAnalysis>(SymbolEqualityComparer.Default);
                 var boundaryComponentNames = allComponentSymbols
-                    .Concat(GetAllNamedTypes(compilation.Assembly.GlobalNamespace).Where(symbol => symbol.InheritsFromOrEquals(errorBoundarySymbol)))
                     .Select(symbol => symbol.Name)
+                    .Concat(GetBoundaryComponentNames(compilation, errorBoundarySymbol))
                     .ToImmutableHashSet(StringComparer.Ordinal);
 
                 foreach (var component in allComponentSymbols)
@@ -4344,6 +4828,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     declaredRenderModes.TryAdd(component, declaredRenderMode);
 
                     var renderTreeAnalysis = AnalyzeComponentRenderTree(component, boundaryComponentNames, cancellationToken);
+                    renderTreeAnalyses[component] = renderTreeAnalysis;
                     if (renderTreeAnalysis.HasBoundaryRoot ||
                         renderTreeAnalysis.UncoveredRegions.Length > 0 ||
                         renderTreeAnalysis.ChildComponents.Count > 0)
@@ -4362,12 +4847,27 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                         var owners = componentOwners.GetOrAdd(childComponent, static _ => new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default));
                         owners.TryAdd(component, 0);
                     }
+
+                    foreach (var childComponent in renderTreeAnalysis.BoundaryProtectedChildComponents)
+                    {
+                        var owners = boundaryProtectedComponentOwners.GetOrAdd(childComponent, static _ => new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default));
+                        owners.TryAdd(component, 0);
+                    }
                 }
+
+                AddDynamicBoundaryProtectedComponentOwners(
+                    allComponentSymbols,
+                    renderTreeAnalyses,
+                    allComponents,
+                    componentOwners,
+                    boundaryProtectedComponentOwners,
+                    cancellationToken);
 
                 var effectiveRenderModes = ComputeEffectiveRenderModes(allComponents.Keys, declaredRenderModes, componentOwners);
                 relevantComponents = ComputeRelevantBoundaryComponents(effectiveRenderModes, componentOwners, localRelevantBoundaryComponents);
                 var boundaryProtectedRenderModes = ComputeBoundaryProtectedRenderModes(relevantComponents, effectiveRenderModes, localBoundaryComponents, componentOwners);
                 boundaryProtectedComponents = ComputeBoundaryProtectedComponents(relevantComponents, effectiveRenderModes, boundaryProtectedRenderModes);
+                lifecycleBoundaryProtectedComponents = ComputeLifecycleBoundaryProtectedComponents(effectiveRenderModes, boundaryProtectedRenderModes, componentOwners, boundaryProtectedComponentOwners);
                 initialized = true;
             }
         }
@@ -4378,6 +4878,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             CancellationToken cancellationToken)
         {
             var childComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+            var generatedBoundaryProtectedChildComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+            var generatedBoundaryProtectedDynamicComponentTypeParameters = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
+            var renderBuilderHelperChildComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
             var hasBoundaryRoot = false;
             var boundaryRootHasErrorContent = true;
             var rootBoundaryIsKeyed = true;
@@ -4427,6 +4930,39 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 {
                     childComponents.Add(childComponent);
                 }
+
+                generatedBoundaryProtectedChildComponents.UnionWith(generatedAnalysis.BoundaryProtectedChildComponents);
+                generatedBoundaryProtectedDynamicComponentTypeParameters.UnionWith(generatedAnalysis.BoundaryProtectedDynamicComponentTypeParameters);
+                if (razorAnalysis is not null)
+                {
+                    generatedBoundaryProtectedDynamicComponentTypeParameters.UnionWith(razorAnalysis.BoundaryProtectedDynamicComponentTypeParameters);
+                }
+            }
+
+            foreach (var renderMethod in componentSymbol.GetMembers().OfType<IMethodSymbol>().Where(static method => method.Name != "BuildRenderTree" && IsRenderMethod(method)))
+            {
+                foreach (var syntaxReference in renderMethod.DeclaringSyntaxReferences)
+                {
+                    if (syntaxReference.GetSyntax(cancellationToken) is not MethodDeclarationSyntax methodDeclaration ||
+                        methodDeclaration.Body is null)
+                    {
+                        continue;
+                    }
+
+                    var semanticModel = compilation.GetSemanticModel(methodDeclaration.SyntaxTree);
+                    foreach (var childComponent in GetRenderedChildComponents(methodDeclaration.Body, semanticModel, componentBaseSymbol, cancellationToken))
+                    {
+                        childComponents.Add(childComponent);
+                        renderBuilderHelperChildComponents.Add(childComponent);
+                    }
+                }
+            }
+
+            var boundaryProtectedChildComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+            boundaryProtectedChildComponents.UnionWith(generatedBoundaryProtectedChildComponents);
+            if (hasBoundaryRoot)
+            {
+                boundaryProtectedChildComponents.UnionWith(renderBuilderHelperChildComponents);
             }
 
             return new RenderTreeAnalysis(
@@ -4436,8 +4972,98 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 rootBoundaryUsesStaleRouteKey,
                 rootBoundaryComponent,
                 childComponents.ToImmutable(),
+                boundaryProtectedChildComponents.ToImmutable(),
+                generatedBoundaryProtectedDynamicComponentTypeParameters.ToImmutable(),
                 uncoveredRegions.ToImmutable(),
                 boundaryRootLocation);
+        }
+
+        private void AddDynamicBoundaryProtectedComponentOwners(
+            IEnumerable<INamedTypeSymbol> componentSymbols,
+            IReadOnlyDictionary<INamedTypeSymbol, RenderTreeAnalysis> renderTreeAnalyses,
+            ConcurrentDictionary<INamedTypeSymbol, byte> allComponents,
+            ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> componentOwners,
+            ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>> boundaryProtectedComponentOwners,
+            CancellationToken cancellationToken)
+        {
+            var dynamicBoundaryHosts = renderTreeAnalyses
+                .Where(static pair => !pair.Value.BoundaryProtectedDynamicComponentTypeParameters.IsEmpty)
+                .ToDictionary(
+                    static pair => pair.Key,
+                    static pair => pair.Value.BoundaryProtectedDynamicComponentTypeParameters,
+                    SymbolEqualityComparer.Default);
+            if (dynamicBoundaryHosts.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var ownerComponent in componentSymbols)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var invocation in GetComponentInvocationExpressions(ownerComponent, cancellationToken))
+                {
+                    if (TryGetOpenedComponentType(invocation.Invocation, invocation.SemanticModel, cancellationToken) is not { } openedComponent ||
+                        !dynamicBoundaryHosts.ContainsKey(openedComponent) ||
+                        !IsDialogOpenInvocation(invocation.Invocation))
+                    {
+                        continue;
+                    }
+
+                    foreach (var targetComponent in GetTypeOfComponents(invocation.Invocation, invocation.SemanticModel, cancellationToken))
+                    {
+                        if (!IsComponent(targetComponent, componentBaseSymbol) ||
+                            IsIgnoredRootComponent(targetComponent))
+                        {
+                            continue;
+                        }
+
+                        allComponents.TryAdd(targetComponent, 0);
+                        componentOwners.GetOrAdd(targetComponent, static _ => new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default))
+                            .TryAdd(ownerComponent, 0);
+                        boundaryProtectedComponentOwners.GetOrAdd(targetComponent, static _ => new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default))
+                            .TryAdd(ownerComponent, 0);
+                    }
+                }
+            }
+        }
+
+        private IEnumerable<(InvocationExpressionSyntax Invocation, SemanticModel SemanticModel)> GetComponentInvocationExpressions(
+            INamedTypeSymbol componentSymbol,
+            CancellationToken cancellationToken)
+        {
+            foreach (var syntaxReference in componentSymbol.DeclaringSyntaxReferences)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var syntax = syntaxReference.GetSyntax(cancellationToken);
+                var semanticModel = compilation.GetSemanticModel(syntax.SyntaxTree);
+                foreach (var invocation in syntax.DescendantNodes(static node => !IsNestedFunctionLike(node)).OfType<InvocationExpressionSyntax>())
+                {
+                    yield return (invocation, semanticModel);
+                }
+            }
+        }
+
+        private static bool IsDialogOpenInvocation(InvocationExpressionSyntax invocation) =>
+            invocation.Expression switch
+            {
+                MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText.StartsWith("Open", StringComparison.Ordinal),
+                GenericNameSyntax genericName => genericName.Identifier.ValueText.StartsWith("Open", StringComparison.Ordinal),
+                IdentifierNameSyntax identifierName => identifierName.Identifier.ValueText.StartsWith("Open", StringComparison.Ordinal),
+                _ => false
+            };
+
+        private static IEnumerable<INamedTypeSymbol> GetTypeOfComponents(
+            InvocationExpressionSyntax invocation,
+            SemanticModel semanticModel,
+            CancellationToken cancellationToken)
+        {
+            foreach (var typeOfExpression in invocation.ArgumentList.Arguments.SelectMany(static argument => argument.Expression.DescendantNodesAndSelf().OfType<TypeOfExpressionSyntax>()))
+            {
+                if (TryGetTypeInfo(typeOfExpression.Type, semanticModel, cancellationToken)?.Type is INamedTypeSymbol componentType)
+                {
+                    yield return componentType;
+                }
+            }
         }
 
         private static IEnumerable<INamedTypeSymbol> GetAllNamedTypes(INamespaceSymbol namespaceSymbol)
@@ -4487,9 +5113,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             bool isDisposeMethod,
             bool hasOperationalCode,
             bool hasFailureProneOperation,
+            bool hasUnhandledFailureProneOperation,
             bool hasJsInteropCalls,
             bool hasUnhandledJsInteropCalls,
             bool hasUnguardedJsInteropCalls,
+            ImmutableHashSet<IMethodSymbol> unhandledFailureProneCallees,
             ImmutableHashSet<IMethodSymbol> unguardedJsInteropCallees,
             bool isAsyncVoid,
             ImmutableArray<Location> catchWithoutLoggingLocations)
@@ -4501,9 +5129,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             IsDisposeMethod = isDisposeMethod;
             HasOperationalCode = hasOperationalCode;
             HasFailureProneOperation = hasFailureProneOperation;
+            HasUnhandledFailureProneOperation = hasUnhandledFailureProneOperation;
             HasJsInteropCalls = hasJsInteropCalls;
             HasUnhandledJsInteropCalls = hasUnhandledJsInteropCalls;
             HasUnguardedJsInteropCalls = hasUnguardedJsInteropCalls;
+            UnhandledFailureProneCallees = unhandledFailureProneCallees;
             UnguardedJsInteropCallees = unguardedJsInteropCallees;
             IsAsyncVoid = isAsyncVoid;
             CatchWithoutLoggingLocations = catchWithoutLoggingLocations;
@@ -4523,17 +5153,34 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         public bool HasFailureProneOperation { get; }
 
+        public bool HasUnhandledFailureProneOperation { get; }
+
         public bool HasJsInteropCalls { get; }
 
         public bool HasUnhandledJsInteropCalls { get; }
 
         public bool HasUnguardedJsInteropCalls { get; }
 
+        public ImmutableHashSet<IMethodSymbol> UnhandledFailureProneCallees { get; }
+
         public ImmutableHashSet<IMethodSymbol> UnguardedJsInteropCallees { get; }
 
         public bool IsAsyncVoid { get; }
 
         public ImmutableArray<Location> CatchWithoutLoggingLocations { get; }
+    }
+
+    private sealed class DynamicComponentReference
+    {
+        public DynamicComponentReference(INamedTypeSymbol? componentType, string? typeParameterName)
+        {
+            ComponentType = componentType;
+            TypeParameterName = typeParameterName;
+        }
+
+        public INamedTypeSymbol? ComponentType { get; }
+
+        public string? TypeParameterName { get; }
     }
 
     private sealed class RenderTreeAnalysis
@@ -4547,6 +5194,31 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             ImmutableHashSet<INamedTypeSymbol> childComponents,
             ImmutableArray<InteractiveRenderRegion> uncoveredRegions,
             Location? boundaryRootLocation)
+            : this(
+                hasBoundaryRoot,
+                boundaryRootHasErrorContent,
+                rootBoundaryIsKeyed,
+                rootBoundaryUsesStaleRouteKey,
+                rootBoundaryComponent,
+                childComponents,
+                ImmutableHashSet<INamedTypeSymbol>.Empty,
+                ImmutableHashSet<string>.Empty,
+                uncoveredRegions,
+                boundaryRootLocation)
+        {
+        }
+
+        public RenderTreeAnalysis(
+            bool hasBoundaryRoot,
+            bool boundaryRootHasErrorContent,
+            bool rootBoundaryIsKeyed,
+            bool rootBoundaryUsesStaleRouteKey,
+            INamedTypeSymbol? rootBoundaryComponent,
+            ImmutableHashSet<INamedTypeSymbol> childComponents,
+            ImmutableHashSet<INamedTypeSymbol> boundaryProtectedChildComponents,
+            ImmutableHashSet<string> boundaryProtectedDynamicComponentTypeParameters,
+            ImmutableArray<InteractiveRenderRegion> uncoveredRegions,
+            Location? boundaryRootLocation)
         {
             HasBoundaryRoot = hasBoundaryRoot;
             BoundaryRootHasErrorContent = boundaryRootHasErrorContent;
@@ -4554,6 +5226,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             RootBoundaryUsesStaleRouteKey = rootBoundaryUsesStaleRouteKey;
             RootBoundaryComponent = rootBoundaryComponent;
             ChildComponents = childComponents;
+            BoundaryProtectedChildComponents = boundaryProtectedChildComponents;
+            BoundaryProtectedDynamicComponentTypeParameters = boundaryProtectedDynamicComponentTypeParameters;
             UncoveredRegions = uncoveredRegions;
             BoundaryRootLocation = boundaryRootLocation;
         }
@@ -4569,6 +5243,10 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         public INamedTypeSymbol? RootBoundaryComponent { get; }
 
         public ImmutableHashSet<INamedTypeSymbol> ChildComponents { get; }
+
+        public ImmutableHashSet<INamedTypeSymbol> BoundaryProtectedChildComponents { get; }
+
+        public ImmutableHashSet<string> BoundaryProtectedDynamicComponentTypeParameters { get; }
 
         public ImmutableArray<InteractiveRenderRegion> UncoveredRegions { get; }
 

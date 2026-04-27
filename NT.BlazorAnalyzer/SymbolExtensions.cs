@@ -42,7 +42,8 @@ internal static class SymbolExtensions
     {
         for (var current = symbol; current is not null; current = current.BaseType)
         {
-            if (SymbolEqualityComparer.Default.Equals(current, target))
+            if (SymbolEqualityComparer.Default.Equals(current, target) ||
+                SymbolEqualityComparer.Default.Equals(current.OriginalDefinition, target.OriginalDefinition))
             {
                 return true;
             }

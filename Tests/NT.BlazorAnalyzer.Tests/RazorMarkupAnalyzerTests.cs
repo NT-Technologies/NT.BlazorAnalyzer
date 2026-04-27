@@ -93,6 +93,44 @@ public sealed class RazorMarkupAnalyzerTests
     }
 
     [Fact]
+    public void Analyze_RecognizesKnownBoundaryName_AndCapturesProtectedDynamicComponentType()
+    {
+        var markup = """
+            <NTErrorBoundary>
+                <TnTForm>
+                    <DynamicComponent Type="FormComponentType" Parameters="Parameters" />
+                </TnTForm>
+            </NTErrorBoundary>
+            """;
+
+        var analysis = RazorMarkupAnalyzer.Analyze(
+            SourceText.From(markup),
+            "Components/FormDialog.razor",
+            ImmutableHashSet.Create("NTErrorBoundary"));
+
+        Assert.True(analysis.HasBoundaryRoot);
+        Assert.Contains("FormComponentType", analysis.BoundaryProtectedDynamicComponentTypeParameters);
+    }
+
+    [Fact]
+    public void Analyze_DoesNotRecognizeBoundaryByNameConventionOnly()
+    {
+        var markup = """
+            <FakeErrorBoundary>
+                <button @onclick="HandleClick">Click</button>
+            </FakeErrorBoundary>
+            """;
+
+        var analysis = RazorMarkupAnalyzer.Analyze(
+            SourceText.From(markup),
+            "Components/FakeBoundaryPage.razor",
+            ImmutableHashSet<string>.Empty);
+
+        Assert.False(analysis.HasBoundaryRoot);
+        Assert.Single(analysis.HtmlInteractiveRegions);
+    }
+
+    [Fact]
     public void Analyze_LeavesBoundaryRootMissingErrorContent_WhenInnerBoundaryExistsWithoutFallback()
     {
         var markup = """
