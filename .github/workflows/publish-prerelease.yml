@@ -1,0 +1,139 @@
+name: Publish Prerelease
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  publish-prerelease:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Check if commit has a preview release tag
+        id: check-tags
+        run: |
+          git fetch --tags
+          if git tag --points-at HEAD | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$'; then
+            echo "is_tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_tagged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup .NET
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup Node.js
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Restore
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        run: dotnet restore NT.BlazorAnalyzer.slnx
+
+      - name: Build
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        run: dotnet build NT.BlazorAnalyzer.slnx -c Release --no-restore -v minimal
+
+      - name: Test
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        run: dotnet test --solution NT.BlazorAnalyzer.slnx -c Release --no-build -v minimal
+
+      - name: Install semantic-release
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        run: npm install --no-save semantic-release @semantic-release/commit-analyzer @semantic-release/release-notes-generator @semantic-release/github conventional-changelog-conventionalcommits
+
+      - name: Tag preview build and create GitHub prerelease
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch --tags
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B preview HEAD
+          git push --force origin HEAD:preview
+          GITHUB_REF=refs/heads/preview GITHUB_REF_NAME=preview npx semantic-release
+
+      - name: Resolve preview package version from tag
+        id: release-version
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        run: |
+          set -euo pipefail
+          git fetch --tags
+          release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if [ -z "$release_tag" ]; then
+            echo "No preview release was created for this commit; skipping package publication."
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate NuGet API key
+        if: steps.check-tags.outputs.is_tagged == 'false' && steps.release-version.outputs.version != ''
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "NUGET_API_KEY secret is missing or unavailable to this workflow."
+            exit 1
+          fi
+
+      - name: Build release artifacts
+        if: steps.check-tags.outputs.is_tagged == 'false' && steps.release-version.outputs.version != ''
+        run: dotnet build NT.BlazorAnalyzer.slnx -c Release --no-restore -v minimal -p:Version=${{ steps.release-version.outputs.version }} -p:PackageVersion=${{ steps.release-version.outputs.version }} -p:InformationalVersion=${{ steps.release-version.outputs.version }}
+
+      - name: Pack analyzer package
+        if: steps.check-tags.outputs.is_tagged == 'false' && steps.release-version.outputs.version != ''
+        run: |
+          set -euo pipefail
+          rm -rf ./artifacts/nuget
+          mkdir -p ./artifacts/nuget
+          dotnet pack ./NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj --no-build --configuration Release --output ./artifacts/nuget -p:PackageVersion=${{ steps.release-version.outputs.version }}
+
+      - name: Verify analyzer package
+        if: steps.check-tags.outputs.is_tagged == 'false' && steps.release-version.outputs.version != ''
+        run: pwsh ./test-analyzer-package.ps1 -PackagePath "./artifacts/nuget/NT.BlazorAnalyzer.${{ steps.release-version.outputs.version }}.nupkg"
+
+      - name: Publish NuGet package
+        if: steps.check-tags.outputs.is_tagged == 'false' && steps.release-version.outputs.version != ''
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push ./artifacts/nuget/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          dotnet nuget push ./artifacts/nuget/*.snupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Delete preview tag on failure
+        if: failure() && steps.check-tags.outputs.is_tagged == 'false'
+        run: |
+          set -euo pipefail
+          git fetch --tags
+          tags=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$' || true)
+          if [ -z "$tags" ]; then
+            echo "No preview release tag found on this commit."
+            exit 0
+          fi
+          for tag in $tags; do
+            echo "Deleting failed preview release tag $tag"
+            git tag -d "$tag" || true
+            git push origin ":refs/tags/$tag"
+          done

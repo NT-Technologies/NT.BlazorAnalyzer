@@ -8,11 +8,15 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace NT.BlazorAnalyzer;
 
+/// <summary>
+/// Analyzes interactive Blazor components for error handling and recovery issues.
+/// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 {
     private const string StaticRenderModeKey = "<static>";
 
+    /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
     [
         DiagnosticDescriptors.MissingErrorBoundary,
@@ -27,6 +31,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         DiagnosticDescriptors.LayoutBoundaryShouldBeRouteKeyed
     ];
 
+    /// <inheritdoc />
     public override void Initialize(AnalysisContext context)
     {
         context.EnableConcurrentExecution();

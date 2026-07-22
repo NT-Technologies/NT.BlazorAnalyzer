@@ -3,17 +3,51 @@
 `NT.BlazorAnalyzer` is a Roslyn analyzer for Blazor component error-handling rules.
 
 Current focus:
+
 - interactive `.razor` components
 - the generated `BuildRenderTree` shape from Razor
 - component methods in `.razor` and `.razor.cs` partials
 
+## Installation
+
+Install the latest stable package from NuGet:
+
+```bash
+dotnet add package NT.BlazorAnalyzer
+```
+
+The package is marked as a development dependency and contributes analyzer and code-fix assets without adding a compile-time or runtime library reference. The analyzer assemblies are loaded from `analyzers/dotnet/cs`.
+
+All diagnostics are enabled by default. Consumer projects can change individual severities in `.editorconfig`, for example:
+
+```ini
+[*.cs]
+dotnet_diagnostic.NTBA0009.severity = none
+```
+
+The analyzer assembly targets `netstandard2.0`. This repository builds and tests with the .NET 10 SDK.
+
 ## Projects
 
-- [NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj](/home/natet/NT.BlazorAnalyzer/NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj): analyzer implementation
-- [Tests/NT.BlazorAnalyzer.Tests/NT.BlazorAnalyzer.Tests.csproj](/home/natet/NT.BlazorAnalyzer/Tests/NT.BlazorAnalyzer.Tests/NT.BlazorAnalyzer.Tests.csproj): xUnit v3 test suite
-- [NT.BlazorAnalyzer.slnx](/home/natet/NT.BlazorAnalyzer/NT.BlazorAnalyzer.slnx): solution
+- [NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj](NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj): analyzer implementation and NuGet package definition
+- [NT.BlazorAnalyzer.CodeFixes/NT.BlazorAnalyzer.CodeFixes.csproj](NT.BlazorAnalyzer.CodeFixes/NT.BlazorAnalyzer.CodeFixes.csproj): IDE code-fix providers packaged with the analyzer
+- [Tests/NT.BlazorAnalyzer.Tests/NT.BlazorAnalyzer.Tests.csproj](Tests/NT.BlazorAnalyzer.Tests/NT.BlazorAnalyzer.Tests.csproj): xUnit v3 test suite running on Microsoft Testing Platform v2 with Microsoft Code Coverage
+- [NT.BlazorAnalyzer.slnx](NT.BlazorAnalyzer.slnx): solution containing all three projects
 
 ## Rules
+
+| Rule | Default severity | Summary | Code fix |
+| --- | --- | --- | --- |
+| `NTBA0001` | Warning | Protect independently interactive render regions with `ErrorBoundary` | No |
+| `NTBA0002` | Warning | Handle failures in uncovered interactive entry methods | No |
+| `NTBA0003` | Warning | Handle failures in lifecycle methods or provide owner-boundary coverage | Wrap body in `try/catch` |
+| `NTBA0004` | Warning | Handle failure-prone disposal | Wrap body in `try/catch` |
+| `NTBA0005` | Warning | Handle JS interop failures | Wrap body in `try/catch` |
+| `NTBA0006` | Warning | Guard early-lifecycle JS interop with an interactivity check | Guard with `RendererInfo.IsInteractive` |
+| `NTBA0007` | Warning | Return `Task` or `ValueTask` instead of `async void` | Change return type to `Task` |
+| `NTBA0008` | Warning | Report the caught exception object or rethrow | Rethrow the exception |
+| `NTBA0009` | Info | Consider custom content for a root `ErrorBoundary` | Add `ErrorContent` |
+| `NTBA0010` | Warning | Avoid relying on static layout boundaries for interactive failures | No |
 
 ### `NTBA0001`
 
@@ -143,7 +177,19 @@ Notes:
 - it doesn't catch interactive event-handler failures unless app routes are globally interactive
 - narrower page or widget boundaries are usually the safer default
 
-## Warning Examples
+## Code Fixes
+
+The packaged code-fix provider supports `NTBA0003` through `NTBA0009`, except rules whose fixes require a design or containment decision:
+
+- `NTBA0003`, `NTBA0004`, and `NTBA0005`: wrap a supported method body in `try/catch`
+- `NTBA0006`: add a `RendererInfo.IsInteractive` guard
+- `NTBA0007`: change an eligible `async void` method to return `Task`
+- `NTBA0008`: rethrow the caught exception
+- `NTBA0009`: add Razor `ErrorContent` markup when the boundary shape can be edited safely
+
+Batch Fix All is available through Roslyn's standard batch fixer. `NTBA0001`, `NTBA0002`, and `NTBA0010` intentionally have no automatic fix because the correct boundary placement or error-handling design depends on the component hierarchy.
+
+## Examples
 
 ### Emits `NTBA0001` and `NTBA0002`
 
@@ -533,32 +579,77 @@ Why:
 - interactive event failures below the layout can still bypass the layout boundary in Blazor Web Apps
 - narrower page or widget boundaries are usually a better default
 
-## Build And Test
+## Build, Test, And Pack
+
+Prerequisites for local development are the .NET 10 SDK and PowerShell 7 for the package verification and release-tracking scripts.
 
 ```bash
-dotnet test NT.BlazorAnalyzer.slnx -v minimal
+dotnet restore NT.BlazorAnalyzer.slnx
 dotnet build NT.BlazorAnalyzer.slnx -c Release -v minimal
-dotnet test NT.BlazorAnalyzer.slnx -v minimal -p:TestingPlatformCommandLineArguments="--coverage --coverage-output-format cobertura --coverage-output ./TestResults/coverage.cobertura.xml"
+dotnet test --solution NT.BlazorAnalyzer.slnx -c Release --no-build -v minimal
 ```
+
+Collect Microsoft Testing Platform coverage with:
+
+```bash
+dotnet test --solution NT.BlazorAnalyzer.slnx -c Release --no-build -v minimal --coverage --coverage-output-format cobertura --coverage-output ./TestResults/coverage.cobertura.xml
+```
+
+Create and verify a local analyzer package with:
+
+```powershell
+dotnet pack ./NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj --configuration Release --no-build --output ./artifacts/nuget -p:PackageVersion=0.0.0-local
+pwsh ./test-analyzer-package.ps1 -PackagePath ./artifacts/nuget/NT.BlazorAnalyzer.0.0.0-local.nupkg
+```
+
+The package verifier checks the NuGet layout and metadata, rejects compile/runtime and compiler-owned assemblies, installs the package into an isolated .NET 10 consumer, and requires that the consumer build report `NTBA0001`.
+
+The repository selects Microsoft Testing Platform through `global.json`, uses `xunit.v3.mtp-v2` as its test runner integration, and collects coverage through `Microsoft.Testing.Extensions.CodeCoverage`. It does not use Coverlet or the VSTest compatibility runner.
+
+Repository builds enable the .NET SDK analyzers and code-style analysis, treat every warning as an error, and require XML documentation for public APIs through `CS1591`.
 
 ## GitHub CI/CD
 
 GitHub Actions files are under `.github/workflows`:
-- `ci.yml`: restores, builds, tests, and collects coverage on pull requests and pushes to `main`; after validation passes on `main`, it installs semantic-release with `npm install --no-save` and runs `npx semantic-release`
-- `release.yml`: runs when a `v*` tag is pushed, packs the analyzer using the tag version, and publishes the `.nupkg` and `.snupkg` to NuGet
+
+- `ci.yml`: restores, builds, tests, and collects coverage on pull requests, pushes to `main`, and manual runs
+- `publish-prerelease.yml`: validates pushes to `main`, tags release-worthy builds with a semantic-release preview version, then verifies and publishes that tagged version's `.nupkg` and `.snupkg` to NuGet
+- `release.yml`: manually tags a stable semantic release from `main`, verifies and publishes that full version, unlists superseded previews, and opens a follow-up analyzer release-tracking pull request when unshipped rules need promotion
+
+[Dependabot configuration](.github/dependabot.yml) checks NuGet and GitHub Actions dependencies weekly and groups updates by ecosystem.
 
 Release configuration lives in `.releaserc.json` and uses:
+
 - `@semantic-release/commit-analyzer`
 - `@semantic-release/release-notes-generator`
-- `@semantic-release/github` creating the GitHub release with generated release notes
+- `@semantic-release/github` to create GitHub releases with generated release notes
+
+Commit analysis and release notes use the Conventional Commits preset.
 
 The release flow is intentionally split:
-- `main` push passes build/test, then semantic-release creates the GitHub release and `v${version}` tag on the validated commit
-- tag creation starts the package publish workflow
-- the tag version is passed as both the build version and NuGet package version
+
+1. A push to `main` validates the repository.
+2. Semantic-release evaluates the Conventional Commits history on the `preview` release branch and, when warranted, tags the validated commit as `v${version}-preview.${number}`.
+3. Only after that preview tag is resolved does the same workflow rebuild with the tagged version, pack and verify the analyzer, and publish the `.nupkg` and `.snupkg` to NuGet. A push with no new preview tag skips package publication.
+4. A stable release is created only by manually dispatching `release.yml`. Semantic-release tags `main` as `v${version}`, after which the workflow rebuilds, verifies, and publishes the full version.
+5. The stable workflow unlists prerelease versions at or below the released core version.
+6. After a stable release, `promote-analyzer-release.ps1` moves unshipped analyzer entries into the shipped file and the workflow opens a pull request when that produces a change.
+
+Both publishing workflows remove a newly created tag if a downstream publication step fails.
 
 Required GitHub secrets:
-- `SEMANTIC_RELEASE_TOKEN`: GitHub token with repository contents write permission. This must be a PAT or equivalent token because tags created by the default `GITHUB_TOKEN` do not reliably trigger the tag-based publish workflow.
+
 - `NUGET_API_KEY`: NuGet.org API key with package push permissions
 
-The NuGet package is published as a Roslyn analyzer package, so the analyzer assembly is placed under `analyzers/dotnet/cs` in the generated `.nupkg`.
+GitHub release creation, tag management, preview-branch updates, and release-tracking pull requests use the workflow-provided `GITHUB_TOKEN`; no separate semantic-release token is required.
+
+## NuGet Package Layout
+
+The package is a development-only Roslyn analyzer package:
+
+- analyzer and code-fix assemblies are under `analyzers/dotnet/cs`
+- code-fix workspace and composition dependencies are colocated with the code-fix provider
+- compiler-owned assemblies such as `Microsoft.CodeAnalysis.dll`, `Microsoft.CodeAnalysis.CSharp.dll`, `System.Collections.Immutable.dll`, and `System.Reflection.Metadata.dll` are excluded
+- no assemblies are published under `lib`, so the package does not add a compile-time or runtime API
+- the `.nupkg` includes `README.md`, `Logo.png`, analyzer symbols, and repository metadata; packing also creates a `.snupkg`
+- XML documentation is generated beside the analyzer and code-fix build outputs

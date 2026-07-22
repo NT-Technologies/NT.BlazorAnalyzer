@@ -6,13 +6,16 @@
     <Copyright>Copyright © NTTechnologies LLC.</Copyright>
     <Description>Roslyn analyzer for Blazor interactive component error handling.</Description>
     <Deterministic>true</Deterministic>
-    <DevelopmentDependency>false</DevelopmentDependency>
+    <DevelopmentDependency>true</DevelopmentDependency>
     <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <IncludeSymbols>true</IncludeSymbols>
     <IsPackable>true</IsPackable>
+    <IsRoslynComponent>true</IsRoslynComponent>
     <NoPackageAnalysis>true</NoPackageAnalysis>
+    <OutputItemType>Analyzer</OutputItemType>
     <PackageIcon>Logo.png</PackageIcon>
     <PackageId>NT.BlazorAnalyzer</PackageId>
     <PackageProjectUrl>https://github.com/NT-Technologies/NT.BlazorAnalyzer</PackageProjectUrl>
@@ -24,6 +27,7 @@
     <RepositoryType>git</RepositoryType>
     <RepositoryUrl>https://github.com/NT-Technologies/NT.BlazorAnalyzer.git</RepositoryUrl>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
     <TargetFramework>netstandard2.0</TargetFramework>
     <Title>NT.BlazorAnalyzer</Title>
   </PropertyGroup>
@@ -33,9 +37,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="3.11.0" PrivateAssets="all" />
-    <PackageReference Include="Microsoft.CodeAnalysis.Common" Version="4.14.0" PrivateAssets="all" />
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="5.6.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Common" Version="5.6.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
@@ -48,11 +52,10 @@
     <None Include="$(OutputPath)$(AssemblyName).pdb" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('$(OutputPath)$(AssemblyName).pdb')" />
     <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/NT.BlazorAnalyzer.CodeFixes.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/NT.BlazorAnalyzer.CodeFixes.dll')" />
     <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/NT.BlazorAnalyzer.CodeFixes.pdb" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/NT.BlazorAnalyzer.CodeFixes.pdb')" />
-    <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Microsoft.CodeAnalysis*.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Microsoft.CodeAnalysis.CSharp.Workspaces.dll')" />
+    <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Microsoft.CodeAnalysis.CSharp.Workspaces.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Microsoft.CodeAnalysis.CSharp.Workspaces.dll')" />
+    <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Microsoft.CodeAnalysis.Workspaces.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Microsoft.CodeAnalysis.Workspaces.dll')" />
     <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/System.Composition*.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/System.Composition.AttributedModel.dll')" />
     <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Humanizer.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Humanizer.dll')" />
-    <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/System.Collections.Immutable.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/System.Collections.Immutable.dll')" />
-    <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/System.Reflection.Metadata.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/System.Reflection.Metadata.dll')" />
     <None Include="../README.md" Pack="true" PackagePath="/" Link="README.md" Visible="false" />
     <None Include="../Logo.png" Pack="true" PackagePath="/" Link="Logo.png" Visible="false" />
   </ItemGroup>

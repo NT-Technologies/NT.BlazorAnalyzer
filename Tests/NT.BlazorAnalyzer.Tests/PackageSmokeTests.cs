@@ -7,7 +7,7 @@ namespace NT.BlazorAnalyzer.Tests;
 public sealed class PackageSmokeTests
 {
     [Fact]
-    public async Task PackedNuGet_ContainsAnalyzerAndCodeFixAssemblies()
+    public async Task PackedNuGet_UsesAnalyzerPackageLayout()
     {
         var cancellationToken = TestContext.Current.CancellationToken;
         var repositoryRoot = FindRepositoryRoot();
@@ -52,8 +52,16 @@ public sealed class PackageSmokeTests
 
             Assert.Contains("analyzers/dotnet/cs/NT.BlazorAnalyzer.dll", packageEntries, StringComparer.OrdinalIgnoreCase);
             Assert.Contains("analyzers/dotnet/cs/NT.BlazorAnalyzer.CodeFixes.dll", packageEntries, StringComparer.OrdinalIgnoreCase);
+            Assert.DoesNotContain("analyzers/dotnet/cs/Microsoft.CodeAnalysis.dll", packageEntries, StringComparer.OrdinalIgnoreCase);
+            Assert.DoesNotContain("analyzers/dotnet/cs/Microsoft.CodeAnalysis.CSharp.dll", packageEntries, StringComparer.OrdinalIgnoreCase);
+            Assert.DoesNotContain(packageEntries, static entry => entry.StartsWith("lib/", StringComparison.OrdinalIgnoreCase));
             Assert.Contains("README.md", packageEntries, StringComparer.OrdinalIgnoreCase);
             Assert.Contains("Logo.png", packageEntries, StringComparer.OrdinalIgnoreCase);
+
+            var manifestEntry = Assert.Single(package.Entries, static entry => entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase));
+            using var manifestReader = new StreamReader(manifestEntry.Open());
+            var manifest = await manifestReader.ReadToEndAsync(cancellationToken);
+            Assert.Contains("<developmentDependency>true</developmentDependency>", manifest, StringComparison.Ordinal);
         }
         finally
         {

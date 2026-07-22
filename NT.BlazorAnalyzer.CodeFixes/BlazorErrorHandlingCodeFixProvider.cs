@@ -9,6 +9,9 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace NT.BlazorAnalyzer;
 
+/// <summary>
+/// Provides fixes for supported Blazor error handling diagnostics.
+/// </summary>
 [ExportCodeFixProvider(LanguageNames.CSharp, Name = nameof(BlazorErrorHandlingCodeFixProvider)), Shared]
 public sealed class BlazorErrorHandlingCodeFixProvider : CodeFixProvider
 {
@@ -18,6 +21,7 @@ public sealed class BlazorErrorHandlingCodeFixProvider : CodeFixProvider
     private const string RethrowExceptionTitle = "Rethrow exception";
     private const string AddErrorContentTitle = "Add ErrorContent";
 
+    /// <inheritdoc />
     public override ImmutableArray<string> FixableDiagnosticIds =>
     [
         "NTBA0003",
@@ -29,8 +33,10 @@ public sealed class BlazorErrorHandlingCodeFixProvider : CodeFixProvider
         "NTBA0009"
     ];
 
+    /// <inheritdoc />
     public override FixAllProvider GetFixAllProvider() => WellKnownFixAllProviders.BatchFixer;
 
+    /// <inheritdoc />
     public override async Task RegisterCodeFixesAsync(CodeFixContext context)
     {
         var diagnostic = context.Diagnostics.First();

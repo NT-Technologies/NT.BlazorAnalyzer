@@ -1,73 +1,45 @@
-name: release
+name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag to publish, for example v1.2.3
-        required: true
-        type: string
 
 permissions:
-  contents: read
+  contents: write
+  issues: write
+  pull-requests: write
 
 jobs:
-  publish-nuget:
+  publish-release:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Resolve tag version
-        id: version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            tag="${{ inputs.tag }}"
-          else
-            tag="${GITHUB_REF_NAME}"
-          fi
-
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Expected a semantic version tag like v1.2.3, got '$tag'." >&2
-            exit 1
-          fi
-
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout release tag
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.version.outputs.tag }}
+          ref: main
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
 
-      - name: Verify NuGet API key
-        shell: bash
-        run: |
-          if [[ -z "${{ secrets.NUGET_API_KEY }}" ]]; then
-            echo "NUGET_API_KEY is required to publish the analyzer package to NuGet." >&2
-            exit 1
-          fi
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
 
       - name: Restore
         run: dotnet restore NT.BlazorAnalyzer.slnx
 
       - name: Build
-        run: dotnet build NT.BlazorAnalyzer.slnx -c Release --no-restore -v minimal -p:Version=${{ steps.version.outputs.version }} -p:PackageVersion=${{ steps.version.outputs.version }} -p:InformationalVersion=${{ steps.version.outputs.version }}
+        run: dotnet build NT.BlazorAnalyzer.slnx -c Release --no-restore -v minimal
 
       - name: Test
-        run: dotnet test NT.BlazorAnalyzer.slnx -c Release --no-build -v minimal
+        run: dotnet test --solution NT.BlazorAnalyzer.slnx -c Release --no-build -v minimal
 
-      - name: Dump Test Failure Logs
+      - name: Dump test failure logs
         if: failure()
         run: |
           set -o pipefail
@@ -87,59 +59,218 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Upload Test Result Artifacts
+      - name: Upload test result artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: publish-nuget-test-results
+          name: release-test-results
           path: |
             TestResults/**
             **/TestResults/**
           if-no-files-found: ignore
 
-      - name: Pack
-        shell: bash
+      - name: Check if commit has a stable release tag
+        id: check-tags
         run: |
-          set -euo pipefail
-          commit="$(git rev-parse HEAD)"
-          dotnet pack NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj \
-            -c Release \
-            --no-build \
-            -o "${{ github.workspace }}/artifacts" \
-            -p:ContinuousIntegrationBuild=true \
-            -p:Version=${{ steps.version.outputs.version }} \
-            -p:PackageVersion=${{ steps.version.outputs.version }} \
-            -p:InformationalVersion=${{ steps.version.outputs.version }} \
-            -p:RepositoryUrl=https://github.com/${{ github.repository }}.git \
-            -p:RepositoryBranch=${{ steps.version.outputs.tag }} \
-            -p:RepositoryCommit="${commit}"
+          git fetch --tags
+          if git tag --points-at HEAD | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "is_tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_tagged=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Publish package to NuGet
+      - name: Install semantic-release
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        run: npm install --no-save semantic-release @semantic-release/commit-analyzer @semantic-release/release-notes-generator @semantic-release/github conventional-changelog-conventionalcommits
+
+      - name: Validate NuGet API key
+        if: steps.check-tags.outputs.is_tagged == 'false'
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        shell: bash
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "NUGET_API_KEY secret is missing or unavailable to this workflow."
+            exit 1
+          fi
+
+      - name: Tag stable build and create GitHub release
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          packages=("${{ github.workspace }}/artifacts"/*.nupkg)
-          symbols=("${{ github.workspace }}/artifacts"/*.snupkg)
+          git fetch --tags
+          npx semantic-release
 
-          if (( ${#packages[@]} == 0 )); then
-            echo 'No NuGet packages were produced.' >&2
+      - name: Resolve stable package version from tag
+        id: release-version
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        run: |
+          set -euo pipefail
+          git fetch --tags
+          release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if [ -z "$release_tag" ]; then
+            echo "No stable release tag found on this commit."
             exit 1
           fi
+          echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
 
-          if (( ${#symbols[@]} == 0 )); then
-            echo 'No symbol packages were produced.' >&2
-            exit 1
+      - name: Build release artifacts
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        run: dotnet build NT.BlazorAnalyzer.slnx -c Release --no-restore -v minimal -p:Version=${{ steps.release-version.outputs.version }} -p:PackageVersion=${{ steps.release-version.outputs.version }} -p:InformationalVersion=${{ steps.release-version.outputs.version }}
+
+      - name: Pack analyzer package
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        run: |
+          set -euo pipefail
+          rm -rf ./artifacts/nuget
+          mkdir -p ./artifacts/nuget
+          dotnet pack ./NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj --no-build --configuration Release --output ./artifacts/nuget -p:PackageVersion=${{ steps.release-version.outputs.version }}
+
+      - name: Verify analyzer package
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        run: pwsh ./test-analyzer-package.ps1 -PackagePath "./artifacts/nuget/NT.BlazorAnalyzer.${{ steps.release-version.outputs.version }}.nupkg"
+
+      - name: Publish NuGet package
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push ./artifacts/nuget/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          dotnet nuget push ./artifacts/nuget/*.snupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Unlist older prerelease packages
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          set -euo pipefail
+          release_version="${{ steps.release-version.outputs.version }}"
+          python3 - "$release_version" <<'PY' > prerelease-versions-to-unlist.txt
+          import json
+          import sys
+          import urllib.request
+
+          release = tuple(int(part) for part in sys.argv[1].split("."))
+          url = "https://api.nuget.org/v3-flatcontainer/nt.blazoranalyzer/index.json"
+
+          with urllib.request.urlopen(url) as response:
+              versions = json.load(response)["versions"]
+
+          for version in versions:
+              version_without_build = version.split("+", 1)[0]
+              if "-" not in version_without_build:
+                  continue
+              core = version_without_build.split("-", 1)[0]
+              try:
+                  core_parts = tuple(int(part) for part in core.split("."))
+              except ValueError:
+                  continue
+              if core_parts <= release:
+                  print(version)
+          PY
+          if [ ! -s prerelease-versions-to-unlist.txt ]; then
+            echo "No prerelease packages older than $release_version were found."
+            exit 0
+          fi
+          while read -r version; do
+            echo "Unlisting NT.BlazorAnalyzer $version"
+            dotnet nuget delete NT.BlazorAnalyzer "$version" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --non-interactive
+          done < prerelease-versions-to-unlist.txt
+
+      - name: Delete stable tag on failure
+        if: failure() && steps.check-tags.outputs.is_tagged == 'false'
+        run: |
+          set -euo pipefail
+          git fetch --tags
+          tags=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          if [ -z "$tags" ]; then
+            echo "No stable release tag found on this commit."
+            exit 0
+          fi
+          for tag in $tags; do
+            echo "Deleting failed stable release tag $tag"
+            git tag -d "$tag" || true
+            git push origin ":refs/tags/$tag"
+          done
+
+  update-analyzer-release-tracking:
+    needs: publish-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout released commit
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Resolve stable release version
+        id: release-version
+        run: |
+          set -euo pipefail
+          git fetch --tags
+          release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if [ -z "$release_tag" ]; then
+            echo "No stable release tag found on this commit; skipping analyzer release tracking."
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Promote analyzer release tracking
+        if: steps.release-version.outputs.version != ''
+        run: pwsh ./promote-analyzer-release.ps1 -Version "${{ steps.release-version.outputs.version }}"
+
+      - name: Detect analyzer release tracking changes
+        id: tracking-changes
+        if: steps.release-version.outputs.version != ''
+        run: |
+          if git diff --quiet -- NT.BlazorAnalyzer/AnalyzerReleases.Shipped.md NT.BlazorAnalyzer/AnalyzerReleases.Unshipped.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-          dotnet nuget push "${packages[@]}" \
-            --api-key "${NUGET_API_KEY}" \
-            --source https://api.nuget.org/v3/index.json \
-            --skip-duplicate
+      - name: Validate analyzer release tracking
+        if: steps.tracking-changes.outputs.changed == 'true'
+        run: dotnet build ./NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj --configuration Release
 
-          dotnet nuget push "${symbols[@]}" \
-            --api-key "${NUGET_API_KEY}" \
-            --source https://api.nuget.org/v3/index.json \
-            --skip-duplicate
+      - name: Commit analyzer release tracking
+        if: steps.tracking-changes.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.release-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="chore/analyzer-release-$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add NT.BlazorAnalyzer/AnalyzerReleases.Shipped.md NT.BlazorAnalyzer/AnalyzerReleases.Unshipped.md
+          git commit -m "chore(analyzers): record release $VERSION"
+          git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" || true
+          git push --force-with-lease origin "HEAD:refs/heads/$branch"
+
+      - name: Open analyzer release tracking pull request
+        if: steps.tracking-changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.release-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="chore/analyzer-release-$VERSION"
+          existing_pr=$(gh pr list --head "$branch" --state open --json url --jq '.[0].url')
+          if [ -n "$existing_pr" ]; then
+            echo "Analyzer release tracking PR already exists: $existing_pr"
+            exit 0
+          fi
+          gh pr create --base main --head "$branch" --title "chore(analyzers): record release $VERSION" --body "Promotes the shipped analyzer rules for $VERSION and resets the unshipped release file."
