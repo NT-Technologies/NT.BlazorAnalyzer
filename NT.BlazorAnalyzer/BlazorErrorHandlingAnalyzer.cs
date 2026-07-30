@@ -1673,7 +1673,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         foreach (var invocation in GetLocalMemberInvocations(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken))
         {
-            if (IsFailureProneOperationMeaningfullyHandled(invocation, semanticModel, cancellationToken))
+            if (IsFailureProneOperationMeaningfullyHandled(invocation, semanticModel, methodSymbol, cancellationToken))
             {
                 continue;
             }
@@ -1705,11 +1705,25 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 methodSymbol.ContainingType,
                 treatExplicitThrowsAsFailureProne: !IsLifecycleMethod(methodSymbol),
                 cancellationToken),
-            hasUnhandledFailureProneOperation: HasUnhandledFailureProneOperation(
+            hasFailureProneOperationExcludingExplicitThrows: HasFailureProneOperation(
                 methodDeclaration,
                 semanticModel,
                 methodSymbol.ContainingType,
+                treatExplicitThrowsAsFailureProne: false,
+                cancellationToken),
+            hasUnhandledFailureProneOperation: HasUnhandledFailureProneOperation(
+                methodDeclaration,
+                semanticModel,
+                methodSymbol,
+                methodSymbol.ContainingType,
                 treatExplicitThrowsAsFailureProne: !IsLifecycleMethod(methodSymbol),
+                cancellationToken),
+            hasUnhandledFailureProneOperationExcludingExplicitThrows: HasUnhandledFailureProneOperation(
+                methodDeclaration,
+                semanticModel,
+                methodSymbol,
+                methodSymbol.ContainingType,
+                treatExplicitThrowsAsFailureProne: false,
                 cancellationToken),
             hasJsInteropCalls: jsInteropCalls.Length > 0,
             hasUnhandledJsInteropCalls: unhandledJsInteropCalls.Length > 0,
@@ -1787,6 +1801,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static bool HasUnhandledFailureProneOperation(
         MethodDeclarationSyntax methodDeclaration,
         SemanticModel semanticModel,
+        IMethodSymbol methodSymbol,
         INamedTypeSymbol containingType,
         bool treatExplicitThrowsAsFailureProne,
         CancellationToken cancellationToken)
@@ -1801,19 +1816,19 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         {
             switch (node)
             {
-                case ThrowStatementSyntax when treatExplicitThrowsAsFailureProne && !IsFailureProneOperationMeaningfullyHandled(node, semanticModel, cancellationToken):
-                case ThrowExpressionSyntax when treatExplicitThrowsAsFailureProne && !IsFailureProneOperationMeaningfullyHandled(node, semanticModel, cancellationToken):
+                case ThrowStatementSyntax when treatExplicitThrowsAsFailureProne && !IsFailureProneOperationMeaningfullyHandled(node, semanticModel, methodSymbol, cancellationToken):
+                case ThrowExpressionSyntax when treatExplicitThrowsAsFailureProne && !IsFailureProneOperationMeaningfullyHandled(node, semanticModel, methodSymbol, cancellationToken):
                     return true;
 
                 case AwaitExpressionSyntax awaitExpression
                     when IsFailureProneAwaitExpression(awaitExpression, semanticModel, containingType, cancellationToken) &&
-                         !IsFailureProneOperationMeaningfullyHandled(awaitExpression, semanticModel, cancellationToken):
+                         !IsFailureProneOperationMeaningfullyHandled(awaitExpression, semanticModel, methodSymbol, cancellationToken):
                     return true;
 
                 case InvocationExpressionSyntax invocation
                     when invocation.Ancestors().OfType<AwaitExpressionSyntax>().FirstOrDefault() is null &&
                          IsFailureProneInvocation(invocation, semanticModel, containingType, cancellationToken, isAwaited: false) &&
-                         !IsFailureProneOperationMeaningfullyHandled(invocation, semanticModel, cancellationToken):
+                         !IsFailureProneOperationMeaningfullyHandled(invocation, semanticModel, methodSymbol, cancellationToken):
                     return true;
             }
         }
@@ -1948,7 +1963,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static bool IsKnownLowRiskReceiverType(INamedTypeSymbol receiverType) =>
         GetTypeMetadataNames(receiverType).Any(static name =>
             name is "Microsoft.AspNetCore.Components.NavigationManager" or
-                "System.IServiceProvider");
+                "System.IServiceProvider" or
+                "System.IFormatProvider" or
+                "System.Globalization.CultureInfo");
 
     private static bool IsOperationalMethodName(string methodName) =>
         methodName.StartsWith("Get", StringComparison.Ordinal) ||
@@ -2017,7 +2034,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     {
         if (!methodAnalyses.TryGetValue(method, out var analysis) ||
             !analysis.IsLifecycleMethod ||
-            !HasFailurePronePath(method, methodAnalyses))
+            !HasFailurePronePath(method, methodAnalyses, excludeExplicitThrows: true))
         {
             return false;
         }
@@ -2074,7 +2091,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 return false;
             }
 
-            if (analysis.HasUnhandledFailureProneOperation)
+            if (analysis.HasUnhandledFailureProneOperationExcludingExplicitThrows)
             {
                 effectiveHandlingCache[currentMethod] = false;
                 return false;
@@ -2090,7 +2107,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             {
                 foreach (var callee in analysis.UnhandledFailureProneCallees)
                 {
-                    if (!HasFailurePronePath(callee, methodAnalyses))
+                    if (!HasFailurePronePath(callee, methodAnalyses, excludeExplicitThrows: true))
                     {
                         continue;
                     }
@@ -2219,7 +2236,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
     private static bool HasFailurePronePath(
         IMethodSymbol method,
-        IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses)
+        IReadOnlyDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses,
+        bool excludeExplicitThrows = false)
     {
         var failureProneCache = new Dictionary<IMethodSymbol, bool>(SymbolEqualityComparer.Default);
         var visitingFailureProne = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
@@ -2238,7 +2256,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 return false;
             }
 
-            if (analysis.HasFailureProneOperation)
+            if (excludeExplicitThrows ? analysis.HasFailureProneOperationExcludingExplicitThrows : analysis.HasFailureProneOperation)
             {
                 failureProneCache[currentMethod] = true;
                 return true;
@@ -3636,7 +3654,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         var builder = ImmutableArray.CreateBuilder<InvocationExpressionSyntax>();
         foreach (var invocation in GetJsInteropInvocations(methodDeclaration, semanticModel, cancellationToken))
         {
-            if (IsJsInteropInvocationMeaningfullyHandled(invocation, semanticModel, methodSymbol, cancellationToken))
+            if (IsJsInteropInvocationMeaningfullyHandled(invocation, semanticModel, cancellationToken))
             {
                 continue;
             }
@@ -3650,7 +3668,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static bool IsJsInteropInvocationMeaningfullyHandled(
         InvocationExpressionSyntax invocation,
         SemanticModel semanticModel,
-        IMethodSymbol methodSymbol,
         CancellationToken cancellationToken)
     {
         foreach (var tryStatement in invocation.Ancestors().OfType<TryStatementSyntax>())
@@ -3665,7 +3682,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 return true;
             }
 
-            if (IsExpectedJsDisconnectedCleanupCatch(tryStatement, invocation, semanticModel, methodSymbol, cancellationToken))
+            if (IsExpectedJsDisconnectedInteropCatch(tryStatement, invocation, semanticModel, cancellationToken))
             {
                 return true;
             }
@@ -3677,6 +3694,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static bool IsFailureProneOperationMeaningfullyHandled(
         SyntaxNode operation,
         SemanticModel semanticModel,
+        IMethodSymbol methodSymbol,
         CancellationToken cancellationToken)
     {
         foreach (var tryStatement in operation.Ancestors().OfType<TryStatementSyntax>())
@@ -3690,49 +3708,59 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             {
                 return true;
             }
+
+            if (TryGetInvocation(operation) is { } invocation &&
+                IsExpectedJsDisconnectedInteropCatch(tryStatement, invocation, semanticModel, cancellationToken))
+            {
+                return true;
+            }
+
+            if (IsDisposeMethod(methodSymbol) && HasMeaningfulFinallyCleanup(tryStatement.Finally))
+            {
+                return true;
+            }
         }
 
         return false;
     }
 
-    private static bool IsExpectedJsDisconnectedCleanupCatch(
+    private static bool IsExpectedJsDisconnectedInteropCatch(
         TryStatementSyntax tryStatement,
         InvocationExpressionSyntax invocation,
         SemanticModel semanticModel,
-        IMethodSymbol methodSymbol,
         CancellationToken cancellationToken)
     {
-        if (!IsDisposeMethod(methodSymbol) ||
-            invocation.Expression is not MemberAccessExpressionSyntax memberAccess ||
-            memberAccess.Name.Identifier.ValueText != "DisposeAsync" ||
-            !IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken))
+        if (!IsJsInteropInvocation(invocation, semanticModel, cancellationToken))
         {
             return false;
         }
 
-        return IsJsDisconnectedExceptionCatchSet(tryStatement.Catches, semanticModel, cancellationToken);
+        return tryStatement.Catches.Any(catchClause =>
+            catchClause.Declaration?.Type is { } catchType &&
+            IsJsDisconnectedExceptionType(catchType, semanticModel, cancellationToken));
     }
 
-    private static bool IsJsDisconnectedExceptionCatchSet(
-        SyntaxList<CatchClauseSyntax> catches,
-        SemanticModel semanticModel,
-        CancellationToken cancellationToken)
+    private static InvocationExpressionSyntax? TryGetInvocation(SyntaxNode operation) => operation switch
     {
-        if (catches.Count == 0)
+        InvocationExpressionSyntax invocation => invocation,
+        AwaitExpressionSyntax { Expression: InvocationExpressionSyntax invocation } => invocation,
+        _ => null
+    };
+
+    private static bool HasMeaningfulFinallyCleanup(FinallyClauseSyntax? finallyClause) =>
+        finallyClause?.Block.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node)).Any(static node =>
+            node is AssignmentExpressionSyntax or InvocationExpressionSyntax) == true;
+
+    private static bool IsJsInteropInvocation(InvocationExpressionSyntax invocation, SemanticModel semanticModel, CancellationToken cancellationToken)
+    {
+        if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+            IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken))
         {
-            return false;
+            return true;
         }
 
-        foreach (var catchClause in catches)
-        {
-            if (catchClause.Declaration?.Type is not { } catchType ||
-                !IsJsDisconnectedExceptionType(catchType, semanticModel, cancellationToken))
-            {
-                return false;
-            }
-        }
-
-        return true;
+        return TryGetSymbol(invocation, semanticModel, cancellationToken) is IMethodSymbol methodSymbol &&
+               IsJsInteropMethod(methodSymbol);
     }
 
     private static bool IsJsInteropMethod(IMethodSymbol methodSymbol)
@@ -3774,6 +3802,14 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return metadataNames.Any(static name =>
                 name is "Microsoft.JSInterop.IJSObjectReference" or
                     "Microsoft.JSInterop.IJSInProcessObjectReference");
+        }
+
+        if (methodSymbol.Name.StartsWith("Import", StringComparison.Ordinal))
+        {
+            return metadataNames.Any(static name =>
+                name is "Microsoft.JSInterop.IJSRuntime" or
+                    "Microsoft.JSInterop.IJSInProcessRuntime" or
+                    "Microsoft.JSInterop.IJSUnmarshalledRuntime");
         }
 
         return false;
@@ -4214,7 +4250,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         var locations = ImmutableArray.CreateBuilder<Location>();
         foreach (var catchClause in methodDeclaration.Body.DescendantNodes(static node => !IsNestedFunctionLike(node)).OfType<CatchClauseSyntax>())
         {
-            if (CatchClauseLogsOrRethrows(catchClause, semanticModel, cancellationToken))
+            if (CatchClauseLogsOrRethrows(catchClause, semanticModel, cancellationToken) ||
+                IsExpectedJsDisconnectedInteropCatch(catchClause, semanticModel, cancellationToken))
             {
                 continue;
             }
@@ -4230,11 +4267,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         SemanticModel semanticModel,
         CancellationToken cancellationToken)
     {
-        if (IsExpectedJsDisconnectedCleanupCatch(catchClause, semanticModel, cancellationToken))
-        {
-            return true;
-        }
-
         if (catchClause.Block.DescendantNodesAndSelf().OfType<ThrowStatementSyntax>().Any())
         {
             return true;
@@ -4265,7 +4297,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static bool IsExpectedJsDisconnectedCleanupCatch(
+    private static bool IsExpectedJsDisconnectedInteropCatch(
         CatchClauseSyntax catchClause,
         SemanticModel semanticModel,
         CancellationToken cancellationToken)
@@ -4276,20 +4308,14 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return false;
         }
 
-        if (catchClause.Ancestors().OfType<TryStatementSyntax>().FirstOrDefault() is not { } tryStatement ||
-            catchClause.FirstAncestorOrSelf<MethodDeclarationSyntax>() is not { } methodDeclaration ||
-            TryGetDeclaredMethodSymbol(methodDeclaration, semanticModel, cancellationToken) is not IMethodSymbol methodSymbol ||
-            !IsDisposeMethod(NormalizeMethodSymbol(methodSymbol)))
+        if (catchClause.Ancestors().OfType<TryStatementSyntax>().FirstOrDefault() is not { } tryStatement)
         {
             return false;
         }
 
         return tryStatement.Block.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node))
             .OfType<InvocationExpressionSyntax>()
-            .Any(invocation =>
-                invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
-                memberAccess.Name.Identifier.ValueText == "DisposeAsync" &&
-                IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken));
+            .Any(invocation => IsJsInteropInvocation(invocation, semanticModel, cancellationToken));
     }
 
     private static bool IsJsDisconnectedExceptionType(
@@ -5145,7 +5171,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             bool isDisposeMethod,
             bool hasOperationalCode,
             bool hasFailureProneOperation,
+            bool hasFailureProneOperationExcludingExplicitThrows,
             bool hasUnhandledFailureProneOperation,
+            bool hasUnhandledFailureProneOperationExcludingExplicitThrows,
             bool hasJsInteropCalls,
             bool hasUnhandledJsInteropCalls,
             bool hasUnguardedJsInteropCalls,
@@ -5161,7 +5189,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             IsDisposeMethod = isDisposeMethod;
             HasOperationalCode = hasOperationalCode;
             HasFailureProneOperation = hasFailureProneOperation;
+            HasFailureProneOperationExcludingExplicitThrows = hasFailureProneOperationExcludingExplicitThrows;
             HasUnhandledFailureProneOperation = hasUnhandledFailureProneOperation;
+            HasUnhandledFailureProneOperationExcludingExplicitThrows = hasUnhandledFailureProneOperationExcludingExplicitThrows;
             HasJsInteropCalls = hasJsInteropCalls;
             HasUnhandledJsInteropCalls = hasUnhandledJsInteropCalls;
             HasUnguardedJsInteropCalls = hasUnguardedJsInteropCalls;
@@ -5185,7 +5215,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         public bool HasFailureProneOperation { get; }
 
+        public bool HasFailureProneOperationExcludingExplicitThrows { get; }
+
         public bool HasUnhandledFailureProneOperation { get; }
+
+        public bool HasUnhandledFailureProneOperationExcludingExplicitThrows { get; }
 
         public bool HasJsInteropCalls { get; }
 
