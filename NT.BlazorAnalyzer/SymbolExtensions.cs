@@ -175,8 +175,9 @@ internal static class SymbolExtensions
 
         if (path.EndsWith("_razor.g.cs", StringComparison.OrdinalIgnoreCase))
         {
-            var mappedPath = path.Substring(0, path.Length - "_razor.g.cs".Length) + ".razor";
-            const string sourceGeneratorSegment = "RazorSourceGenerator\\";
+            var normalizedPath = path.Replace('\\', '/');
+            var mappedPath = normalizedPath.Substring(0, normalizedPath.Length - "_razor.g.cs".Length) + ".razor";
+            const string sourceGeneratorSegment = "RazorSourceGenerator/";
             var sourceGeneratorIndex = mappedPath.LastIndexOf(sourceGeneratorSegment, StringComparison.OrdinalIgnoreCase);
             if (sourceGeneratorIndex >= 0)
             {

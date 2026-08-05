@@ -745,14 +745,16 @@ public sealed class BlazorCoverageRegressionTests
         Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0001");
     }
 
-    [Fact]
-    public async Task LayoutBoundaryWithoutRouteKey_UsesRazorMarkupLocation_ForSourceGeneratorPath()
+    [Theory]
+    [InlineData(@"obj\Debug\net10.0\Microsoft.CodeAnalysis.Razor.Compiler\Microsoft.NET.Sdk.Razor.SourceGenerators.RazorSourceGenerator\Layout\MainLayout_razor.g.cs")]
+    [InlineData("obj/Debug/net10.0/Microsoft.CodeAnalysis.Razor.Compiler/Microsoft.NET.Sdk.Razor.SourceGenerators.RazorSourceGenerator/Layout/MainLayout_razor.g.cs")]
+    public async Task LayoutBoundaryWithoutRouteKey_UsesRazorMarkupLocation_ForSourceGeneratorPath(string generatedPath)
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             sources:
             [
                 new SourceFile(
-                    Path: @"obj\Debug\net9.0\Microsoft.CodeAnalysis.Razor.Compiler\Microsoft.NET.Sdk.Razor.SourceGenerators.RazorSourceGenerator\Layout\MainLayout_razor.g.cs",
+                    Path: generatedPath,
                     Text: """
                         namespace TestComponents
                         {
@@ -779,7 +781,7 @@ public sealed class BlazorCoverageRegressionTests
             additionalFiles:
             [
                 TestComponentSources.CreateRazorMarkup(
-                    componentName: @"Layout\MainLayout",
+                    componentName: "Layout/MainLayout",
                     markup: """
                         @inherits LayoutComponentBase
                         <ErrorBoundary>
@@ -791,8 +793,9 @@ public sealed class BlazorCoverageRegressionTests
                         """)
             ]);
 
-        var diagnostic = Assert.Single(diagnostics, static item => item.Id == "NTBA0010");
-        Assert.EndsWith(@"Layout\MainLayout.razor", diagnostic.Location.GetLineSpan().Path, StringComparison.OrdinalIgnoreCase);
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("NTBA0010", diagnostic.Id);
+        Assert.Equal("Layout/MainLayout.razor", diagnostic.Location.GetLineSpan().Path);
     }
 
     [Fact]
