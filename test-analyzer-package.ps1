@@ -1,4 +1,8 @@
-param([Parameter(Mandatory = $true)][string]$PackagePath)
+param(
+    [Parameter(Mandatory = $true)][string]$PackagePath,
+    # Each framework compiles the component with its own Razor language version.
+    [string[]]$TargetFrameworks = @('net8.0', 'net9.0', 'net10.0')
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -24,10 +28,9 @@ try {
         throw 'Analyzer package must not expose its assembly as a compile or runtime library.'
     }
 
-    foreach ($compilerAssembly in 'Microsoft.CodeAnalysis.dll', 'Microsoft.CodeAnalysis.CSharp.dll', 'System.Collections.Immutable.dll', 'System.Reflection.Metadata.dll') {
-        if ($archive.Entries | Where-Object FullName -eq "analyzers/dotnet/cs/$compilerAssembly") {
-            throw "Analyzer package must not contain compiler-owned assembly '$compilerAssembly'."
-        }
+    $hostOwnedEntries = $archive.Entries | Where-Object { $_.FullName -like 'analyzers/*' -and $_.FullName -notlike 'analyzers/dotnet/cs/NT.BlazorAnalyzer.*' }
+    if ($hostOwnedEntries) {
+        throw "Analyzer package must only contain NT.BlazorAnalyzer assemblies under analyzers/; found: $($hostOwnedEntries.FullName -join ', ')."
     }
 
     $nuspecEntry = $archive.Entries | Where-Object FullName -like '*.nuspec' | Select-Object -First 1
@@ -66,17 +69,16 @@ try {
     New-Item -ItemType Directory -Path $feedDirectory, $projectDirectory | Out-Null
     Copy-Item -LiteralPath $resolvedPackagePath -Destination $feedDirectory
 
-    $escapedFeedDirectory = [System.Security.SecurityElement]::Escape($feedDirectory)
     $escapedPackagesDirectory = [System.Security.SecurityElement]::Escape($packagesDirectory)
     $project = @"
-<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk.Razor">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>$($TargetFrameworks -join ';')</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <RestoreSources>$escapedFeedDirectory</RestoreSources>
     <RestorePackagesPath>$escapedPackagesDirectory</RestorePackagesPath>
     <NuGetAudit>false</NuGetAudit>
+    <NTBlazorAnalyzerMode>strict</NTBlazorAnalyzerMode>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
@@ -85,33 +87,28 @@ try {
 </Project>
 "@
 
-    $source = @'
-namespace AnalyzerPackageConsumer;
+    # A real component, so the Razor source generator produces the code the analyzer inspects.
+    $component = @'
+@using Microsoft.AspNetCore.Components.Web
+@rendermode RenderMode.InteractiveServer
 
-[Counter.__PrivateComponentRenderModeAttribute]
-public partial class Counter : Microsoft.AspNetCore.Components.ComponentBase
-{
-    protected override void BuildRenderTree(Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder builder)
-    {
-        builder.OpenElement(0, "button");
-        builder.AddAttribute(1, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create<Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, HandleClick));
-        builder.CloseElement();
-    }
+<button @onclick="HandleClick">Click</button>
 
+@code {
     private static void HandleClick() => throw new InvalidOperationException();
-
-    private sealed class __PrivateComponentRenderModeAttribute : Microsoft.AspNetCore.Components.RenderModeAttribute
-    {
-        public override Microsoft.AspNetCore.Components.IComponentRenderMode Mode => Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer;
-    }
 }
 '@
 
     $projectPath = Join-Path $projectDirectory 'AnalyzerPackageConsumer.csproj'
     [System.IO.File]::WriteAllText($projectPath, $project, [System.Text.UTF8Encoding]::new($false))
-    [System.IO.File]::WriteAllText((Join-Path $projectDirectory 'Counter.razor.g.cs'), $source, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $projectDirectory 'Counter.razor'), $component, [System.Text.UTF8Encoding]::new($false))
+    # Build with the same SDK band as the repository rather than whatever newest preview is installed.
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'global.json') -Destination $temporaryDirectory
 
-    $restoreOutput = & dotnet restore $projectPath --source $feedDirectory --ignore-failed-sources --verbosity minimal 2>&1
+    # The local feed supplies the package under test; nuget.org supplies any targeting packs not installed locally.
+    $nugetConfig = "<configuration><packageSources><clear /><add key=`"local`" value=`"$([System.Security.SecurityElement]::Escape($feedDirectory))`" /><add key=`"nuget.org`" value=`"https://api.nuget.org/v3/index.json`" /></packageSources></configuration>"
+    [System.IO.File]::WriteAllText((Join-Path $temporaryDirectory 'nuget.config'), $nugetConfig, [System.Text.UTF8Encoding]::new($false))
+    $restoreOutput = & dotnet restore $projectPath --verbosity minimal 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Analyzer package consumer restore failed:`n$($restoreOutput -join [Environment]::NewLine)"
     }
@@ -121,11 +118,27 @@ public partial class Counter : Microsoft.AspNetCore.Components.ComponentBase
     if ($LASTEXITCODE -ne 0) {
         throw "Analyzer package consumer build failed:`n$buildText"
     }
-    if ($buildText -notmatch '\bNTBA0001\b') {
-        throw "Analyzer package consumer build did not report NTBA0001:`n$buildText"
+
+    foreach ($targetFramework in $TargetFrameworks) {
+        foreach ($ruleId in 'NTBA0001', 'NTBA0002') {
+            $pattern = "Counter\.razor\(\d+,\d+\): warning $ruleId\b.*TargetFramework=$([regex]::Escape($targetFramework))\]"
+            if ($buildText -notmatch $pattern) {
+                throw "Consumer build for $targetFramework did not report $ruleId at the Razor source location:`n$buildText"
+            }
+        }
     }
 
-    Write-Host "Verified $packageId $packageVersion and observed NTBA0001 in a consumer build."
+    # Recommended (default) mode: the boundary-coverage rules are Info, so the same consumer reports no NTBA0001/NTBA0002 warning.
+    [System.IO.File]::WriteAllText($projectPath, $project.Replace('<NTBlazorAnalyzerMode>strict</NTBlazorAnalyzerMode>', ''), [System.Text.UTF8Encoding]::new($false))
+    $defaultBuildText = (& dotnet build $projectPath --no-restore --configuration Release --verbosity minimal 2>&1) -join [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0) {
+        throw "Analyzer package consumer build in default mode failed:`n$defaultBuildText"
+    }
+    if ($defaultBuildText -match 'warning NTBA000[12]\b') {
+        throw "Default-mode consumer build reported NTBA0001/NTBA0002 as a warning; recommended mode should report them as Info:`n$defaultBuildText"
+    }
+
+    Write-Host "Verified $packageId ${packageVersion}: strict-mode NTBA0001 and NTBA0002 reported at Counter.razor for $($TargetFrameworks -join ', '), and not as warnings in default mode."
 }
 finally {
     if (Test-Path -LiteralPath $temporaryDirectory) {

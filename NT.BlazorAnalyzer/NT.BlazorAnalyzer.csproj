@@ -52,10 +52,7 @@
     <None Include="$(OutputPath)$(AssemblyName).pdb" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('$(OutputPath)$(AssemblyName).pdb')" />
     <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/NT.BlazorAnalyzer.CodeFixes.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/NT.BlazorAnalyzer.CodeFixes.dll')" />
     <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/NT.BlazorAnalyzer.CodeFixes.pdb" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/NT.BlazorAnalyzer.CodeFixes.pdb')" />
-    <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Microsoft.CodeAnalysis.CSharp.Workspaces.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Microsoft.CodeAnalysis.CSharp.Workspaces.dll')" />
-    <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Microsoft.CodeAnalysis.Workspaces.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Microsoft.CodeAnalysis.Workspaces.dll')" />
-    <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/System.Composition*.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/System.Composition.AttributedModel.dll')" />
-    <None Include="../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Humanizer.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" Condition="Exists('../NT.BlazorAnalyzer.CodeFixes/bin/$(Configuration)/netstandard2.0/Humanizer.dll')" />
+    <None Include="build/NT.BlazorAnalyzer.targets;build/NT.BlazorAnalyzer.strict.globalconfig" Pack="true" PackagePath="build" />
     <None Include="../README.md" Pack="true" PackagePath="/" Link="README.md" Visible="false" />
     <None Include="../Logo.png" Pack="true" PackagePath="/" Link="Logo.png" Visible="false" />
   </ItemGroup>

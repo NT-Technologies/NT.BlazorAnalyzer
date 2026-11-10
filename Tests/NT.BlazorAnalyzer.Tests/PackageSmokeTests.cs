@@ -52,11 +52,14 @@ public sealed class PackageSmokeTests
 
             Assert.Contains("analyzers/dotnet/cs/NT.BlazorAnalyzer.dll", packageEntries, StringComparer.OrdinalIgnoreCase);
             Assert.Contains("analyzers/dotnet/cs/NT.BlazorAnalyzer.CodeFixes.dll", packageEntries, StringComparer.OrdinalIgnoreCase);
-            Assert.DoesNotContain("analyzers/dotnet/cs/Microsoft.CodeAnalysis.dll", packageEntries, StringComparer.OrdinalIgnoreCase);
-            Assert.DoesNotContain("analyzers/dotnet/cs/Microsoft.CodeAnalysis.CSharp.dll", packageEntries, StringComparer.OrdinalIgnoreCase);
+            Assert.All(
+                packageEntries.Where(static entry => entry.StartsWith("analyzers/", StringComparison.OrdinalIgnoreCase)),
+                static entry => Assert.StartsWith("analyzers/dotnet/cs/NT.BlazorAnalyzer.", entry, StringComparison.OrdinalIgnoreCase));
             Assert.DoesNotContain(packageEntries, static entry => entry.StartsWith("lib/", StringComparison.OrdinalIgnoreCase));
             Assert.Contains("README.md", packageEntries, StringComparer.OrdinalIgnoreCase);
             Assert.Contains("Logo.png", packageEntries, StringComparer.OrdinalIgnoreCase);
+            Assert.Contains("build/NT.BlazorAnalyzer.targets", packageEntries, StringComparer.OrdinalIgnoreCase);
+            Assert.Contains("build/NT.BlazorAnalyzer.strict.globalconfig", packageEntries, StringComparer.OrdinalIgnoreCase);
 
             var manifestEntry = Assert.Single(package.Entries, static entry => entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase));
             using var manifestReader = new StreamReader(manifestEntry.Open());

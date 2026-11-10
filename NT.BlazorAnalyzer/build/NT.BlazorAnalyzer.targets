@@ -1,0 +1,6 @@
+<Project>
+  <!-- Set <NTBlazorAnalyzerMode>strict</NTBlazorAnalyzerMode> to restore Warning severity for the boundary-coverage rules. -->
+  <ItemGroup Condition="'$(NTBlazorAnalyzerMode)' == 'strict'">
+    <EditorConfigFiles Include="$(MSBuildThisFileDirectory)NT.BlazorAnalyzer.strict.globalconfig" />
+  </ItemGroup>
+</Project>

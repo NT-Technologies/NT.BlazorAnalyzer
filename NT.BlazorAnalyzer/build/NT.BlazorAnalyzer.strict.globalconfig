@@ -1,0 +1,10 @@
+# Strict NT.BlazorAnalyzer preset, enabled with <NTBlazorAnalyzerMode>strict</NTBlazorAnalyzerMode>.
+# A negative level lets the consumer's own .globalconfig and .editorconfig entries win.
+is_global = true
+global_level = -1
+
+dotnet_diagnostic.NTBA0001.severity = warning
+dotnet_diagnostic.NTBA0002.severity = warning
+
+# Strict mode also treats awaited calls with no evidence of failure as failure-prone.
+ntba.unknown_awaits_are_failure_prone = true
