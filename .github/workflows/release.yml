@@ -132,6 +132,7 @@ jobs:
         run: pwsh ./test-analyzer-package.ps1 -PackagePath "./artifacts/nuget/NT.BlazorAnalyzer.${{ steps.release-version.outputs.version }}.nupkg"
 
       - name: Publish NuGet package
+        id: publish
         if: steps.check-tags.outputs.is_tagged == 'false'
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
@@ -179,7 +180,7 @@ jobs:
           done < prerelease-versions-to-unlist.txt
 
       - name: Delete stable tag on failure
-        if: failure() && steps.check-tags.outputs.is_tagged == 'false'
+        if: failure() && steps.check-tags.outputs.is_tagged == 'false' && steps.publish.outcome == 'skipped'
         run: |
           set -euo pipefail
           git fetch --tags
