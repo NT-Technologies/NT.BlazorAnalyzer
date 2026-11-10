@@ -583,9 +583,9 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                         {
                             currentCount++;
                         }
-                        catch (System.Exception)
+                        catch (System.Exception exception)
                         {
-                            throw;
+                            System.Console.Error.WriteLine(exception);
                         }
                     }
                     """));
@@ -595,7 +595,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
             diagnostic =>
             {
                 Assert.Equal("NTBA0001", diagnostic.Id);
-                Assert.Equal(DiagnosticSeverity.Warning, diagnostic.Severity);
+                Assert.Equal(DiagnosticSeverity.Info, diagnostic.Severity);
             },
             diagnostic =>
             {
@@ -619,9 +619,9 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                         {
                             IncrementCore();
                         }
-                        catch (System.Exception)
+                        catch (System.Exception exception)
                         {
-                            throw;
+                            System.Console.Error.WriteLine(exception);
                         }
                     }
 
@@ -652,9 +652,9 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                         {
                             currentCount++;
                         }
-                        catch (System.Exception)
+                        catch (System.Exception exception)
                         {
-                            throw;
+                            System.Console.Error.WriteLine(exception);
                         }
                     }
                     """));
@@ -685,9 +685,9 @@ public sealed class BlazorErrorHandlingAnalyzerTests
                         {
                             IncrementCore();
                         }
-                        catch (System.Exception)
+                        catch (System.Exception exception)
                         {
-                            throw;
+                            System.Console.Error.WriteLine(exception);
                         }
                     }
 
@@ -734,7 +734,7 @@ public sealed class BlazorErrorHandlingAnalyzerTests
 
                     private sealed class DataService
                     {
-                        public global::System.Threading.Tasks.Task LoadAsync() => global::System.Threading.Tasks.Task.CompletedTask;
+                        public global::System.Threading.Tasks.Task LoadAsync() => new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                     }
                     """));
 

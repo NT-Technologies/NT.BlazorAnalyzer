@@ -63,7 +63,8 @@ public sealed class BlazorLifecycleFalsePositiveRegressionTests
     }
 
     [Fact]
-    public async Task OnAfterRenderAsync_CatchingJsDisconnectedException_DoesNotReportLifecycleOrSwallowedCatchDiagnostics()
+    // A disconnect-only catch keeps the circuit-gone case quiet, but a JSException from the script still escapes.
+    public async Task OnAfterRenderAsync_CatchingOnlyJsDisconnectedException_ReportsUnhandledJsFailure_ButNotSwallowedCatch()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -91,12 +92,13 @@ public sealed class BlazorLifecycleFalsePositiveRegressionTests
                     }
                     """));
 
-        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id is "NTBA0003" or "NTBA0005");
         Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
     }
 
     [Fact]
-    public async Task OnAfterRenderAsync_CatchingDisconnectFromJsRuntimeImportExtension_DoesNotReportDiagnostics()
+    // Import* extensions on IJSRuntime are JS interop; a failed module import is a JSException the disconnect-only catch misses.
+    public async Task OnAfterRenderAsync_CatchingOnlyDisconnectFromJsRuntimeImportExtension_ReportsUnhandledJsFailure_ButNotSwallowedCatch()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -131,7 +133,8 @@ public sealed class BlazorLifecycleFalsePositiveRegressionTests
                 }
                 """));
 
-        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id is "NTBA0003" or "NTBA0005" or "NTBA0008");
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id is "NTBA0003" or "NTBA0005");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
     }
 
     [Fact]

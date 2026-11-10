@@ -679,6 +679,7 @@ public sealed class BlazorCoverageRegressionTests
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             sources:
             [
+                TestComponentSources.CreateStaticComponent(componentName: "Routes", renderTreeStatements: ""),
                 TestComponentSources.CreateStaticComponent(
                     componentName: "MainLayout",
                     renderTreeStatements: """
@@ -701,7 +702,7 @@ public sealed class BlazorCoverageRegressionTests
                         __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.HeadOutlet>(0);
                         __builder.AddComponentRenderMode(global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer);
                         __builder.CloseComponent();
-                        __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Routing.Routes>(1);
+                        __builder.OpenComponent<global::TestComponents.Routes>(1);
                         __builder.AddComponentRenderMode(global::Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer);
                         __builder.CloseComponent();
                         """)
@@ -1118,6 +1119,75 @@ public sealed class BlazorCoverageRegressionTests
                     """));
 
         Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_GenericStaticChildInsideBoundary_DoesNotReportNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            CreateGenericGrid(),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::Microsoft.AspNetCore.Components.Web.ErrorBoundary>(0);
+                    __builder.AddAttribute(1, "ChildContent", (global::Microsoft.AspNetCore.Components.RenderFragment)((__builder2) =>
+                    {
+                        __builder2.OpenComponent<global::TestComponents.Grid<int>>(2);
+                        __builder2.CloseComponent();
+                    }));
+                    __builder.AddAttribute(3, "ErrorContent", (global::Microsoft.AspNetCore.Components.RenderFragment<global::System.Exception>)(__error => (__builder3) =>
+                    {
+                        __builder3.OpenElement(4, "p");
+                        __builder3.CloseElement();
+                    }));
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    [Fact]
+    public async Task LifecycleMethod_GenericStaticChildWithoutBoundary_ReportsNtba0003()
+    {
+        var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
+            CreateGenericGrid(),
+            TestComponentSources.CreateInteractiveComponent(
+                componentName: "Page",
+                renderTreeStatements: """
+                    __builder.OpenComponent<global::TestComponents.Grid<int>>(0);
+                    __builder.CloseComponent();
+                    """));
+
+        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+    }
+
+    private static SourceFile CreateGenericGrid()
+    {
+        var grid = TestComponentSources.CreateStaticComponent(
+            componentName: "Grid",
+            renderTreeStatements: """
+                __builder.OpenElement(0, "div");
+                __builder.CloseElement();
+                """,
+            razorMethods: """
+                private DataService Service { get; } = new();
+
+                protected override async global::System.Threading.Tasks.Task OnInitializedAsync()
+                {
+                    await Service.LoadAsync();
+                }
+
+                private sealed class DataService
+                {
+                    public async global::System.Threading.Tasks.Task LoadAsync()
+                    {
+                        await global::System.Threading.Tasks.Task.Yield();
+                        await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
+                    }
+                }
+                """);
+
+        return grid with { Text = grid.Text.Replace("public partial class Grid :", "public partial class Grid<TItem> :", StringComparison.Ordinal) };
     }
 
     private static string CreateButtonRenderTree(string handlerName) =>

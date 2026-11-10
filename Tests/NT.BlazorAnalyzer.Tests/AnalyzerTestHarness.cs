@@ -1,3 +1,4 @@
+using Xunit;
 using System.Collections.Immutable;
 using System.Reflection;
 using Microsoft.CodeAnalysis;
@@ -11,18 +12,24 @@ internal static class AnalyzerTestHarness
 {
     public static async Task<IReadOnlyList<Diagnostic>> GetDiagnosticsAsync(
         IEnumerable<SourceFile> sources,
-        IEnumerable<AdditionalSourceFile>? additionalFiles = null)
+        IEnumerable<AdditionalSourceFile>? additionalFiles = null,
+        IReadOnlyDictionary<string, string>? globalOptions = null,
+        bool concurrentAnalysis = true,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? treeOptions = null)
     {
         var compilation = CreateCompilation(sources);
-        var analyzer = new BlazorErrorHandlingAnalyzer();
-        var analyzers = ImmutableArray.Create<DiagnosticAnalyzer>(analyzer);
+        var analyzers = ImmutableArray.Create<DiagnosticAnalyzer>(new BlazorErrorHandlingAnalyzer(), new BackgroundFailureAnalyzer());
         var analyzerOptions = new AnalyzerOptions(
             additionalFiles?
                 .Select(static file => (AdditionalText)new InMemoryAdditionalText(file.Path, file.Text))
                 .ToImmutableArray() ??
-            ImmutableArray<AdditionalText>.Empty);
-        var compilationWithAnalyzers = compilation.WithAnalyzers(analyzers, new CompilationWithAnalyzersOptions(analyzerOptions, null, concurrentAnalysis: true, logAnalyzerExecutionTime: false, reportSuppressedDiagnostics: false));
+            ImmutableArray<AdditionalText>.Empty,
+            new InMemoryAnalyzerConfigOptionsProvider(globalOptions ?? new Dictionary<string, string>(), treeOptions));
+        var compilationWithAnalyzers = compilation.WithAnalyzers(analyzers, new CompilationWithAnalyzersOptions(analyzerOptions, null, concurrentAnalysis, logAnalyzerExecutionTime: false, reportSuppressedDiagnostics: false));
         var diagnostics = await compilationWithAnalyzers.GetAnalyzerDiagnosticsAsync();
+
+        // An analyzer exception surfaces as AD0001; tests that filter by rule ID would otherwise hide a crash.
+        Assert.DoesNotContain(diagnostics, static diagnostic => diagnostic.Id == "AD0001");
 
         return diagnostics
             .OrderBy(static diagnostic => diagnostic.Id, StringComparer.Ordinal)
@@ -47,7 +54,7 @@ internal static class AnalyzerTestHarness
             assemblyName: "NT.BlazorAnalyzer.Tests.Generated",
             syntaxTrees: syntaxTrees,
             references: GetMetadataReferences(),
-            options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+            options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true));
     }
 
     private static IReadOnlyList<MetadataReference> GetMetadataReferences()

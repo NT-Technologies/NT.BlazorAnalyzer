@@ -5,14 +5,16 @@ namespace NT.BlazorAnalyzer;
 internal static class DiagnosticDescriptors
 {
     private const string Category = "Reliability";
+    private const string HelpLinkPrefix = "https://github.com/NT-Technologies/NT.BlazorAnalyzer/blob/main/docs/rules/";
 
     public static readonly DiagnosticDescriptor MissingErrorBoundary = new(
         id: "NTBA0001",
         title: "Interactive render region should be protected by ErrorBoundary",
-        messageFormat: "Interactive render region in component '{0}' should be protected by ErrorBoundary. Wrapping '{1}' in an ErrorBoundary resolves this warning. Suggested scope: '{2}'.",
+        messageFormat: "Interactive render region in component '{0}' should be protected by ErrorBoundary. Wrapping '{1}' in an ErrorBoundary resolves this diagnostic. Suggested scope: '{2}'.",
         category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0001.md",
         description: "Each independently interactive, user-visible render region in a Blazor component hierarchy should be covered by ErrorBoundary or a derived component at an appropriate containment level.",
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
@@ -21,8 +23,9 @@ internal static class DiagnosticDescriptors
         title: "Uncovered interactive entry method should use try/catch",
         messageFormat: "Method '{0}' in interactive component '{1}' performs failure-prone work reachable from an uncovered interactive region without try/catch handling",
         category: Category,
-        defaultSeverity: DiagnosticSeverity.Warning,
+        defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0002.md",
         description: "Failure-prone interactive entry methods reachable from independently interactive render regions without ErrorBoundary coverage should use try/catch handling or delegate entirely to a safe member method.",
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
@@ -33,6 +36,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0003.md",
         description: "Failure-prone interactive Blazor lifecycle methods should use meaningful exception handling or be rendered only through known owner components that are covered by ErrorBoundary. Early lifecycle failures are especially risky during prerendering and circuit initialization, and delegation to a safe handler is acceptable.");
 
     public static readonly DiagnosticDescriptor DisposeMissingTryCatch = new(
@@ -42,6 +46,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0004.md",
         description: "Failure-prone cleanup in interactive Blazor Dispose and DisposeAsync methods should use meaningful exception handling. Delegation to a safe local cleanup helper is acceptable.");
 
     public static readonly DiagnosticDescriptor JsInteropMissingTryCatch = new(
@@ -51,6 +56,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0005.md",
         description: "JS interop calls in interactive Blazor components should use meaningful exception handling. Logged or rethrown catches are accepted, and DisposeAsync cleanup may intentionally catch JSDisconnectedException.");
 
     public static readonly DiagnosticDescriptor JsInteropRequiresInteractivityGuard = new(
@@ -60,6 +66,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0006.md",
         description: "JS interop in initialization and parameter lifecycle methods should be guarded by a recognized interactivity check such as RendererInfo.IsInteractive or AssignedRenderMode being non-null, or moved to OnAfterRender.");
 
     public static readonly DiagnosticDescriptor AsyncVoidMethod = new(
@@ -69,6 +76,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0007.md",
         description: "Interactive Blazor component async methods should return Task or ValueTask instead of async void so the framework can observe completion and exception flow.");
 
     public static readonly DiagnosticDescriptor CatchWithoutLogging = new(
@@ -78,6 +86,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0008.md",
         description: "Exception handling in interactive Blazor components should preserve the caught exception through logging, telemetry, or rethrowing.");
 
     public static readonly DiagnosticDescriptor ErrorBoundaryMissingErrorContent = new(
@@ -87,6 +96,7 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Info,
         isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0009.md",
         description: "Custom ErrorContent is optional in Blazor, but user-facing root ErrorBoundary components usually benefit from a clearer fallback experience than the default UI.",
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
 
@@ -97,6 +107,27 @@ internal static class DiagnosticDescriptors
         category: Category,
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0010.md",
         description: "A layout-level ErrorBoundary in a static layout only covers static SSR in Blazor Web Apps. Prefer narrower page or widget boundaries, or adopt globally interactive app routes when broad layout recovery is intentional.",
         customTags: [WellKnownDiagnosticTags.CompilationEnd]);
+
+    public static readonly DiagnosticDescriptor UnobservedComponentTask = new(
+        id: "NTBA0011",
+        title: "Component task failure is never observed",
+        messageFormat: "Task returned by '{0}' in interactive component '{1}' is not awaited, so its failure is lost; await it, or catch failures inside it and pass them to DispatchExceptionAsync",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0011.md",
+        description: "A fire-and-forget task started from a component runs outside Blazor's error handling. Its exception is never observed by the renderer or an ErrorBoundary unless the task catches it and routes it through ComponentBase.DispatchExceptionAsync.");
+
+    public static readonly DiagnosticDescriptor UnhandledExternalCallback = new(
+        id: "NTBA0012",
+        title: "Callback from outside the render flow should handle failures",
+        messageFormat: "Callback '{0}' in interactive component '{1}' runs outside Blazor's render flow without handling failures; catch them and pass them to DispatchExceptionAsync",
+        category: Category,
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true,
+        helpLinkUri: HelpLinkPrefix + "NTBA0012.md",
+        description: "Timer callbacks, NavigationManager.LocationChanged handlers, and application service events invoke component code outside the renderer's call stack, so ErrorBoundary cannot catch their failures. Handle failures inside the callback and route them through ComponentBase.DispatchExceptionAsync.");
 }

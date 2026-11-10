@@ -169,4 +169,42 @@ public sealed class RazorMarkupAnalyzerTests
         Assert.Single(analysis.ComponentRoots);
         Assert.Equal("SectionHeader", analysis.ComponentRoots[0].TagName);
     }
+
+    [Fact]
+    public void Analyze_WithTrailingDotTagName_DoesNotThrow()
+    {
+        var analysis = RazorMarkupAnalyzer.Analyze(SourceText.From("<Foo.>"), "Components/Test.razor", ImmutableHashSet<string>.Empty);
+
+        Assert.NotNull(analysis);
+    }
+
+    [Fact]
+    public void Analyze_WithUnclosedVoidElement_StillDetectsBoundaryRoot()
+    {
+        var markup = "<br>\n<ErrorBoundary><button @onclick=\"X\"></button></ErrorBoundary>";
+
+        var analysis = RazorMarkupAnalyzer.Analyze(SourceText.From(markup), "Components/Test.razor", ImmutableHashSet<string>.Empty);
+
+        Assert.True(analysis.HasBoundaryRoot);
+    }
+
+    [Fact]
+    public void Analyze_WithGenericTypeInDirectiveLine_DoesNotTreatItAsComponentTag()
+    {
+        var markup = "@inject ILogger<Index> Log\n<ErrorBoundary><button @onclick=\"X\"></button></ErrorBoundary>";
+
+        var analysis = RazorMarkupAnalyzer.Analyze(SourceText.From(markup), "Components/Test.razor", ImmutableHashSet<string>.Empty);
+
+        Assert.True(analysis.HasBoundaryRoot);
+    }
+
+    [Theory]
+    [InlineData("<input @bind=\"x\" />")]
+    [InlineData("<input @bind=\"x\" @bind:event=\"oninput\" />")]
+    public void Analyze_WithPlainBind_CapturesHtmlInteractiveRegion(string markup)
+    {
+        var analysis = RazorMarkupAnalyzer.Analyze(SourceText.From(markup), "Components/Test.razor", ImmutableHashSet<string>.Empty);
+
+        Assert.Single(analysis.HtmlInteractiveRegions);
+    }
 }

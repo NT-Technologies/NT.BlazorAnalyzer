@@ -25,7 +25,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
 
                     private sealed class DataService
                     {
-                        public global::System.Threading.Tasks.Task LoadAsync() => global::System.Threading.Tasks.Task.CompletedTask;
+                        public global::System.Threading.Tasks.Task LoadAsync() => new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                     }
                     """));
 
@@ -56,7 +56,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                         public async global::System.Threading.Tasks.Task LoadAsync()
                         {
                             await global::System.Threading.Tasks.Task.Yield();
-                            throw new global::System.InvalidOperationException();
+                            await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                         }
                     }
                     """),
@@ -103,7 +103,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                         public async global::System.Threading.Tasks.Task LoadAsync()
                         {
                             await global::System.Threading.Tasks.Task.Yield();
-                            throw new global::System.InvalidOperationException();
+                            await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                         }
                     }
                     """),
@@ -156,7 +156,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                             public async global::System.Threading.Tasks.Task LoadAsync()
                             {
                                 await global::System.Threading.Tasks.Task.Yield();
-                                throw new global::System.InvalidOperationException();
+                                await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                             }
                         }
                         """),
@@ -204,7 +204,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                         public async global::System.Threading.Tasks.Task LoadAsync()
                         {
                             await global::System.Threading.Tasks.Task.Yield();
-                            throw new global::System.InvalidOperationException();
+                            await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                         }
                     }
                     """),
@@ -278,7 +278,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                                 public async global::System.Threading.Tasks.Task LoadAsync()
                                 {
                                     await global::System.Threading.Tasks.Task.Yield();
-                                    throw new global::System.InvalidOperationException();
+                                    await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                                 }
                             }
                         }
@@ -348,7 +348,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                                 public async global::System.Threading.Tasks.Task LoadAsync()
                                 {
                                     await global::System.Threading.Tasks.Task.Yield();
-                                    throw new global::System.InvalidOperationException();
+                                    await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                                 }
                             }
                         }
@@ -412,7 +412,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                         public async global::System.Threading.Tasks.Task LoadAsync()
                         {
                             await global::System.Threading.Tasks.Task.Yield();
-                            throw new global::System.InvalidOperationException();
+                            await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                         }
                     }
                     """),
@@ -520,7 +520,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                         public async global::System.Threading.Tasks.Task LoadAsync()
                         {
                             await global::System.Threading.Tasks.Task.Yield();
-                            throw new global::System.InvalidOperationException();
+                            await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                         }
                     }
                     """));
@@ -551,7 +551,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                         public async global::System.Threading.Tasks.Task LoadAsync()
                         {
                             await global::System.Threading.Tasks.Task.Yield();
-                            throw new global::System.InvalidOperationException();
+                            await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                         }
                     }
                     """),
@@ -745,7 +745,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     private async global::System.Threading.Tasks.Task LoadAsync()
                     {
                         await global::System.Threading.Tasks.Task.Yield();
-                        throw new global::System.InvalidOperationException();
+                        await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                     }
 
                     private sealed class Logger
@@ -793,7 +793,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     private async global::System.Threading.Tasks.Task LoadAsync()
                     {
                         await global::System.Threading.Tasks.Task.Yield();
-                        throw new global::System.InvalidOperationException();
+                        await new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                     }
 
                     private sealed class Logger
@@ -835,7 +835,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
 
                     private sealed class DataService
                     {
-                        public global::System.Threading.Tasks.Task LoadAsync() => global::System.Threading.Tasks.Task.CompletedTask;
+                        public global::System.Threading.Tasks.Task LoadAsync() => new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                     }
 
                     private sealed class Logger
@@ -879,7 +879,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
 
                     private sealed class DataService
                     {
-                        public global::System.Threading.Tasks.Task LoadAsync() => global::System.Threading.Tasks.Task.CompletedTask;
+                        public global::System.Threading.Tasks.Task LoadAsync() => new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                     }
 
                     private sealed class Logger
@@ -894,7 +894,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
     }
 
     [Fact]
-    public async Task LifecycleMethod_WithSwallowedCatch_StillReportsNtba0003()
+    public async Task LifecycleMethod_WithSwallowedCatch_ReportsOnlyNtba0008()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -919,11 +919,11 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
 
                     private sealed class DataService
                     {
-                        public global::System.Threading.Tasks.Task LoadAsync() => global::System.Threading.Tasks.Task.CompletedTask;
+                        public global::System.Threading.Tasks.Task LoadAsync() => new global::System.Net.Http.HttpClient().GetStringAsync("https://example.test/data");
                     }
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0003");
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
     }
 
@@ -1027,7 +1027,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
     }
 
     [Fact]
-    public async Task DisposeMethod_WithSwallowedCatch_StillReportsNtba0004()
+    public async Task DisposeMethod_WithSwallowedCatch_ReportsOnlyNtba0008()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -1054,7 +1054,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     }
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0004");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0004");
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
     }
 
@@ -1083,7 +1083,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
     }
 
     [Fact]
-    public async Task JsInteropWithSwallowedCatch_StillReportsNtba0005()
+    public async Task JsInteropWithSwallowedCatch_ReportsOnlyNtba0008()
     {
         var diagnostics = await AnalyzerTestHarness.GetDiagnosticsAsync(
             TestComponentSources.CreateInteractiveComponent(
@@ -1108,7 +1108,7 @@ public sealed class BlazorAdditionalErrorHandlingAnalyzerTests
                     }
                     """));
 
-        Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0005");
+        Assert.DoesNotContain(diagnostics, diagnostic => diagnostic.Id == "NTBA0005");
         Assert.Contains(diagnostics, diagnostic => diagnostic.Id == "NTBA0008");
     }
 

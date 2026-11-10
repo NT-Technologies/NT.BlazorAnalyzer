@@ -41,7 +41,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         {
             var componentBaseSymbol = compilationStartContext.Compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.ComponentBase");
             var layoutComponentBaseSymbol = compilationStartContext.Compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.LayoutComponentBase");
-            var errorBoundarySymbol = compilationStartContext.Compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.Web.ErrorBoundary");
+            // ErrorBoundaryBase is the documented base for custom boundaries; Microsoft's Web.ErrorBoundary is one implementation.
+            var errorBoundarySymbol = compilationStartContext.Compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.ErrorBoundaryBase");
             var renderModeAttributeSymbol = compilationStartContext.Compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.RenderModeAttribute");
 
             if (componentBaseSymbol is null || layoutComponentBaseSymbol is null || errorBoundarySymbol is null || renderModeAttributeSymbol is null)
@@ -63,25 +64,35 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             var buildRenderTreeRootMethods = new ConcurrentDictionary<IMethodSymbol, byte>(SymbolEqualityComparer.Default);
             var methodAnalyses = new ConcurrentDictionary<IMethodSymbol, MethodAnalysis>(SymbolEqualityComparer.Default);
             var boundaryComponentNames = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
-            foreach (var boundaryComponentName in GetBoundaryComponentNames(compilationStartContext.Compilation, errorBoundarySymbol))
+            var knownBoundaryComponentNames = GetBoundaryComponentNames(compilationStartContext.Compilation, errorBoundarySymbol, compilationStartContext.CancellationToken);
+            foreach (var boundaryComponentName in knownBoundaryComponentNames)
             {
                 boundaryComponentNames.TryAdd(boundaryComponentName, 0);
             }
 
             var componentRenderAnalyses = new ConcurrentDictionary<INamedTypeSymbol, ComponentRenderAnalysis>(SymbolEqualityComparer.Default);
-            var locallyReportedMissingErrorBoundaryComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
-            var locallyReportedBoundaryMissingErrorContentComponents = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var locallyReportedMissingTryCatchMethods = new ConcurrentDictionary<IMethodSymbol, byte>(SymbolEqualityComparer.Default);
             var globalInteractiveRoutesOwners = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
             var razorAdditionalFiles = CreateRazorAdditionalFileMap(compilationStartContext.Options.AdditionalFiles);
             var razorMarkupCache = new ConcurrentDictionary<string, RazorMarkupAnalysis?>(StringComparer.OrdinalIgnoreCase);
+            var settings = AnalyzerSettings.Create(compilationStartContext.Options.AnalyzerConfigOptionsProvider, compilationStartContext.Compilation);
+            var routeAttributeSymbol = compilationStartContext.Compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.RouteAttribute");
+            // Computed once from all sources, so the answer never depends on which component is analyzed first.
+            // Computed eagerly from the whole compilation, so no later caller can observe a cached cancellation or a partial answer.
+            var hasGlobalInteractiveRoutes = compilationStartContext.Compilation.SyntaxTrees.Any(tree =>
+                tree.GetRoot(compilationStartContext.CancellationToken).DescendantNodes().OfType<MethodDeclarationSyntax>().Any(method =>
+                    method.Identifier.ValueText == "BuildRenderTree" &&
+                    method.Body is not null &&
+                    HasInteractiveRoutesRenderMode(method.Body, settings.GetSemanticModel(tree), compilationStartContext.CancellationToken)));
             var boundaryCoverageResolver = new BoundaryCoverageResolver(
                 compilationStartContext.Compilation,
                 componentBaseSymbol,
                 errorBoundarySymbol,
                 renderModeAttributeSymbol,
+                knownBoundaryComponentNames,
                 razorAdditionalFiles,
-                razorMarkupCache);
+                razorMarkupCache,
+                settings.DefaultRenderMode);
 
             compilationStartContext.RegisterSymbolAction(
                 symbolContext => CollectCandidateComponent(
@@ -94,7 +105,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     allComponents,
                     layoutComponents,
                     declaredRenderModes,
-                    boundaryComponentNames),
+                    boundaryComponentNames,
+                    settings.DefaultRenderMode),
                 SymbolKind.NamedType);
 
             compilationStartContext.RegisterSymbolStartAction(symbolStartContext =>
@@ -115,34 +127,46 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                         errorBoundarySymbol,
                         componentSymbol,
                         localBuildRenderTreeRootMethods,
-                        localMethodAnalyses),
+                        localMethodAnalyses,
+                        settings),
                     SyntaxKind.MethodDeclaration);
 
                 symbolStartContext.RegisterSymbolEndAction(symbolEndContext =>
                 {
-                    ReportLocalLifecycleTryCatchDiagnostics(
-                        symbolEndContext,
-                        componentSymbol,
-                        localMethodAnalyses,
-                        boundaryCoverageResolver);
+                    // Static SSR failures become HTTP error responses, not circuit failures, so lifecycle and dispose rules do not apply.
+                    var isStaticSsr = IsStaticSsrComponent(componentSymbol, renderModeAttributeSymbol, routeAttributeSymbol, hasGlobalInteractiveRoutes, settings.DefaultRenderMode);
+                    if (!isStaticSsr && !settings.AssumeOwnerErrorBoundary)
+                    {
+                        ReportLocalLifecycleTryCatchDiagnostics(
+                            symbolEndContext,
+                            componentSymbol,
+                            localMethodAnalyses,
+                            boundaryCoverageResolver);
+                    }
 
                     ReportLocalLifecycleJsInteropGuardDiagnostics(
                         symbolEndContext,
                         componentSymbol,
                         localMethodAnalyses);
 
-                    ReportLocalDisposeTryCatchDiagnostics(
-                        symbolEndContext,
-                        componentSymbol,
-                        localMethodAnalyses);
+                    if (!isStaticSsr)
+                    {
+                        ReportLocalDisposeTryCatchDiagnostics(
+                            symbolEndContext,
+                            componentSymbol,
+                            localMethodAnalyses);
+                    }
 
-                    ReportLocalMissingTryCatchDiagnostics(
-                        symbolEndContext,
-                        componentSymbol,
-                        localBuildRenderTreeRootMethods,
-                        localMethodAnalyses,
-                        locallyReportedMissingTryCatchMethods,
-                        boundaryCoverageResolver);
+                    if (!settings.AssumeOwnerErrorBoundary)
+                    {
+                        ReportLocalMissingTryCatchDiagnostics(
+                            symbolEndContext,
+                            componentSymbol,
+                            localBuildRenderTreeRootMethods,
+                            localMethodAnalyses,
+                            locallyReportedMissingTryCatchMethods,
+                            boundaryCoverageResolver);
+                    }
                 });
             }, SymbolKind.NamedType);
 
@@ -166,10 +190,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     boundaryComponentNames,
                     componentRenderAnalyses,
                     globalInteractiveRoutesOwners,
-                    locallyReportedMissingErrorBoundaryComponents,
-                    locallyReportedBoundaryMissingErrorContentComponents,
                     razorAdditionalFiles,
-                    razorMarkupCache),
+                    razorMarkupCache,
+                    settings),
                 SyntaxKind.MethodDeclaration);
 
             compilationStartContext.RegisterCompilationEndAction(
@@ -190,9 +213,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     methodAnalyses,
                     componentRenderAnalyses,
                     globalInteractiveRoutesOwners,
-                    locallyReportedMissingErrorBoundaryComponents,
-                    locallyReportedBoundaryMissingErrorContentComponents,
-                    locallyReportedMissingTryCatchMethods));
+                    locallyReportedMissingTryCatchMethods,
+                    settings.AssumeOwnerErrorBoundary,
+                    boundaryCoverageResolver));
         });
     }
 
@@ -206,7 +229,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ConcurrentDictionary<INamedTypeSymbol, byte> allComponents,
         ConcurrentDictionary<INamedTypeSymbol, byte> layoutComponents,
         ConcurrentDictionary<INamedTypeSymbol, string?> declaredRenderModes,
-        ConcurrentDictionary<string, byte> boundaryComponentNames)
+        ConcurrentDictionary<string, byte> boundaryComponentNames,
+        string? defaultRenderMode)
     {
         var namedType = (INamedTypeSymbol)context.Symbol;
         if (namedType.TypeKind == TypeKind.Class && namedType.InheritsFromOrEquals(errorBoundarySymbol))
@@ -225,7 +249,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             layoutComponents.TryAdd(namedType, 0);
         }
 
-        var declaredRenderMode = GetDeclaredRenderModeKey(namedType, renderModeAttributeSymbol);
+        var declaredRenderMode = GetDeclaredRenderModeKey(namedType, renderModeAttributeSymbol) ?? defaultRenderMode;
         declaredRenderModes.TryAdd(namedType, declaredRenderMode);
         if (declaredRenderMode is not null)
         {
@@ -252,10 +276,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ConcurrentDictionary<string, byte> boundaryComponentNames,
         ConcurrentDictionary<INamedTypeSymbol, ComponentRenderAnalysis> componentRenderAnalyses,
         ConcurrentDictionary<INamedTypeSymbol, byte> globalInteractiveRoutesOwners,
-        ConcurrentDictionary<INamedTypeSymbol, byte> locallyReportedMissingErrorBoundaryComponents,
-        ConcurrentDictionary<INamedTypeSymbol, byte> locallyReportedBoundaryMissingErrorContentComponents,
         ImmutableDictionary<string, AdditionalText> razorAdditionalFiles,
-        ConcurrentDictionary<string, RazorMarkupAnalysis?> razorMarkupCache)
+        ConcurrentDictionary<string, RazorMarkupAnalysis?> razorMarkupCache,
+        AnalyzerSettings settings)
     {
         if (context.Node is not MethodDeclarationSyntax methodDeclaration ||
             TryGetDeclaredMethodSymbol(methodDeclaration, context.SemanticModel, context.CancellationToken) is not IMethodSymbol declaredMethod)
@@ -280,7 +303,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             }
         }
 
-        if (methodSymbol.Name == "BuildRenderTree")
+        if (IsBuildRenderTreeOverride(methodSymbol))
         {
             if (methodDeclaration.Body is null)
             {
@@ -337,7 +360,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             }
 
             if (containingType.InheritsFromOrEquals(errorBoundarySymbol) &&
-                BoundaryTypeHasBuiltInErrorContent(containingType, errorBoundarySymbol, context.CancellationToken))
+                BoundaryTypeHasBuiltInErrorContent(containingType, context.CancellationToken))
             {
                 localBoundaryComponents.TryAdd(containingType, 0);
                 boundaryComponentsWithBuiltInErrorContent.TryAdd(containingType, 0);
@@ -380,13 +403,13 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        if (GetDeclaredRenderModeKey(containingType, renderModeAttributeSymbol) is null ||
+        if ((GetDeclaredRenderModeKey(containingType, renderModeAttributeSymbol) ?? settings.DefaultRenderMode) is null ||
             !IsRelevantMethod(methodSymbol, containingType))
         {
             return;
         }
 
-        var analysis = AnalyzeMethod(methodDeclaration, methodSymbol, context.SemanticModel, context.CancellationToken);
+        var analysis = AnalyzeMethod(methodDeclaration, methodSymbol, context.SemanticModel, settings, context.CancellationToken);
         methodAnalyses[methodSymbol] = analysis;
 
         var methodLocation = methodSymbol.GetPreferredSourceLocation();
@@ -429,7 +452,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         INamedTypeSymbol errorBoundarySymbol,
         INamedTypeSymbol componentSymbol,
         ConcurrentDictionary<IMethodSymbol, byte> localBuildRenderTreeRootMethods,
-        ConcurrentDictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses)
+        ConcurrentDictionary<IMethodSymbol, MethodAnalysis> localMethodAnalyses,
+        AnalyzerSettings settings)
     {
         if (context.Node is not MethodDeclarationSyntax methodDeclaration ||
             TryGetDeclaredMethodSymbol(methodDeclaration, context.SemanticModel, context.CancellationToken) is not IMethodSymbol declaredMethod)
@@ -444,7 +468,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        if (methodSymbol.Name == "BuildRenderTree")
+        if (IsBuildRenderTreeOverride(methodSymbol))
         {
             if (methodDeclaration.Body is null)
             {
@@ -470,7 +494,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        localMethodAnalyses[methodSymbol] = AnalyzeMethod(methodDeclaration, methodSymbol, context.SemanticModel, context.CancellationToken);
+        localMethodAnalyses[methodSymbol] = AnalyzeMethod(methodDeclaration, methodSymbol, context.SemanticModel, settings, context.CancellationToken);
     }
 
     private static void ReportLocalMissingTryCatchDiagnostics(
@@ -483,7 +507,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     {
         if (localMethodAnalyses.Count == 0 ||
             !boundaryCoverageResolver.IsRelevantComponent(componentSymbol, context.CancellationToken) ||
-            boundaryCoverageResolver.IsBoundaryProtected(componentSymbol, context.CancellationToken))
+            boundaryCoverageResolver.IsBoundaryProtected(componentSymbol, context.CancellationToken) ||
+            boundaryCoverageResolver.IsLifecycleBoundaryProtected(componentSymbol, context.CancellationToken))
         {
             return;
         }
@@ -520,6 +545,19 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 componentSymbol.Name));
         }
     }
+
+    /// <summary>
+    /// A component without a declared render mode renders only in static SSR when it receives the cascading HttpContext, or when it
+    /// is a routable page in an app whose routes are not globally interactive. A client project that cannot see the server's
+    /// Routes render mode treats such pages as static, which can only hide diagnostics, never add them.
+    /// </summary>
+    private static bool IsStaticSsrComponent(INamedTypeSymbol componentSymbol, INamedTypeSymbol renderModeAttributeSymbol, INamedTypeSymbol? routeAttributeSymbol, bool hasGlobalInteractiveRoutes, string? defaultRenderMode) =>
+        (GetDeclaredRenderModeKey(componentSymbol, renderModeAttributeSymbol) ?? defaultRenderMode) is null &&
+        (componentSymbol.GetMembers().OfType<IPropertySymbol>().Any(static property =>
+             property.Type.ToDisplayString() is "Microsoft.AspNetCore.Http.HttpContext" or "Microsoft.AspNetCore.Http.HttpContext?" &&
+             property.GetAttributes().Any(static attribute => attribute.AttributeClass?.ToDisplayString() == "Microsoft.AspNetCore.Components.CascadingParameterAttribute")) ||
+         (componentSymbol.GetAttributes().Any(attribute => SymbolEqualityComparer.Default.Equals(attribute.AttributeClass, routeAttributeSymbol)) &&
+          !hasGlobalInteractiveRoutes));
 
     private static void ReportLocalLifecycleTryCatchDiagnostics(
         SymbolAnalysisContext context,
@@ -629,9 +667,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         ConcurrentDictionary<IMethodSymbol, MethodAnalysis> methodAnalyses,
         ConcurrentDictionary<INamedTypeSymbol, ComponentRenderAnalysis> componentRenderAnalyses,
         ConcurrentDictionary<INamedTypeSymbol, byte> globalInteractiveRoutesOwners,
-        ConcurrentDictionary<INamedTypeSymbol, byte> locallyReportedMissingErrorBoundaryComponents,
-        ConcurrentDictionary<INamedTypeSymbol, byte> locallyReportedBoundaryMissingErrorContentComponents,
-        ConcurrentDictionary<IMethodSymbol, byte> locallyReportedMissingTryCatchMethods)
+        ConcurrentDictionary<IMethodSymbol, byte> locallyReportedMissingTryCatchMethods,
+        bool assumeOwnerErrorBoundary,
+        BoundaryCoverageResolver boundaryCoverageResolver)
     {
         var effectiveRenderModes = ComputeEffectiveRenderModes(allComponents.Keys, declaredRenderModes, componentOwners);
         var relevantComponents = ComputeRelevantBoundaryComponents(effectiveRenderModes, componentOwners, localRelevantBoundaryComponents);
@@ -642,15 +680,17 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         foreach (var component in relevantComponents.OrderBy(static type => type.ToDisplayString(), StringComparer.Ordinal))
         {
-            var boundaryProtected = boundaryProtectedComponents.Contains(component);
+            // Root-boundary owners cover a component, and so does an ErrorBoundary nested anywhere around it in every owner.
+            var boundaryProtected = assumeOwnerErrorBoundary ||
+                boundaryProtectedComponents.Contains(component) ||
+                boundaryCoverageResolver.IsLifecycleBoundaryProtected(component, context.CancellationToken);
             var renderAnalysis = componentRenderAnalyses.TryGetValue(component, out var knownRenderAnalysis)
                 ? knownRenderAnalysis
                 : new ComponentRenderAnalysis([], component.GetPreferredSourceLocation());
             var boundaryLocation = component.PreferNonGeneratedSourceLocation(renderAnalysis.BoundaryLocation);
 
             if (!boundaryProtected &&
-                ShouldReportMissingErrorBoundary(component, layoutComponents, declaredRenderModes, effectiveRenderModes, boundaryProtectedRenderModes, componentOwners) &&
-                !locallyReportedMissingErrorBoundaryComponents.ContainsKey(component))
+                ShouldReportMissingErrorBoundary(component, layoutComponents, declaredRenderModes, effectiveRenderModes, boundaryProtectedRenderModes, componentOwners))
             {
                 var resolverSymbols = suggestedBoundaryResolvers.TryGetValue(component, out var resolvers) && resolvers.Length > 0
                     ? resolvers
@@ -688,7 +728,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
             if (localBoundaryComponents.ContainsKey(component) &&
                 !boundaryHasErrorContent &&
-                !locallyReportedBoundaryMissingErrorContentComponents.ContainsKey(component) &&
                 boundaryLocation is not null)
             {
                 context.ReportDiagnostic(Diagnostic.Create(
@@ -1297,12 +1336,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return true;
     }
 
-    private static bool IsComponent(INamedTypeSymbol namedType, INamedTypeSymbol componentBaseSymbol) =>
+    internal static bool IsComponent(INamedTypeSymbol namedType, INamedTypeSymbol componentBaseSymbol) =>
         namedType.TypeKind == TypeKind.Class &&
         namedType.InheritsFromOrEquals(componentBaseSymbol) &&
         namedType.HasPathContaining(".razor");
 
-    private static string? GetDeclaredRenderModeKey(INamedTypeSymbol namedType, INamedTypeSymbol renderModeAttributeSymbol)
+    internal static string? GetDeclaredRenderModeKey(INamedTypeSymbol namedType, INamedTypeSymbol renderModeAttributeSymbol)
     {
         foreach (var attribute in namedType.GetAttributes())
         {
@@ -1360,52 +1399,69 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return builder.ToImmutable();
     }
 
-    private static ImmutableHashSet<string> GetBoundaryComponentNames(Compilation compilation, INamedTypeSymbol errorBoundarySymbol)
+    private static ImmutableHashSet<string> GetBoundaryComponentNames(Compilation compilation, INamedTypeSymbol errorBoundarySymbol, CancellationToken cancellationToken)
     {
         var builder = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
-        AddBoundaryComponentNames(compilation.Assembly.GlobalNamespace, errorBoundarySymbol, builder);
-        foreach (var referencedAssembly in compilation.SourceModule.ReferencedAssemblySymbols)
+        AddBoundaryComponentNames(compilation.Assembly.GlobalNamespace, errorBoundarySymbol, builder, cancellationToken);
+
+        // A type can only derive from ErrorBoundary if its assembly references the assembly declaring its base type,
+        // so only scan assemblies that reference ErrorBoundary's assembly or another assembly that declares a boundary.
+        var boundaryAssemblies = new HashSet<IAssemblySymbol>(SymbolEqualityComparer.Default) { errorBoundarySymbol.ContainingAssembly };
+        var pendingAssemblies = compilation.SourceModule.ReferencedAssemblySymbols.ToList();
+        for (var scanned = true; scanned;)
         {
-            AddBoundaryComponentNames(referencedAssembly.GlobalNamespace, errorBoundarySymbol, builder);
+            scanned = false;
+            for (var index = pendingAssemblies.Count - 1; index >= 0; index--)
+            {
+                var assembly = pendingAssemblies[index];
+                if (!boundaryAssemblies.Contains(assembly) && !assembly.Modules.Any(module => module.ReferencedAssemblySymbols.Any(boundaryAssemblies.Contains)))
+                {
+                    continue;
+                }
+
+                pendingAssemblies.RemoveAt(index);
+                scanned = true;
+                if (AddBoundaryComponentNames(assembly.GlobalNamespace, errorBoundarySymbol, builder, cancellationToken))
+                {
+                    boundaryAssemblies.Add(assembly);
+                }
+            }
         }
 
         return builder.ToImmutable();
     }
 
-    private static void AddBoundaryComponentNames(
-        INamespaceSymbol namespaceSymbol,
-        INamedTypeSymbol errorBoundarySymbol,
-        ImmutableHashSet<string>.Builder builder)
+    private static bool AddBoundaryComponentNames(INamespaceSymbol namespaceSymbol, INamedTypeSymbol errorBoundarySymbol, ImmutableHashSet<string>.Builder builder, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        var found = false;
         foreach (var member in namespaceSymbol.GetMembers())
         {
-            if (member is INamespaceSymbol nestedNamespace)
+            found |= member switch
             {
-                AddBoundaryComponentNames(nestedNamespace, errorBoundarySymbol, builder);
-                continue;
-            }
-
-            if (member is INamedTypeSymbol namedType)
-            {
-                AddBoundaryComponentNames(namedType, errorBoundarySymbol, builder);
-            }
+                INamespaceSymbol nestedNamespace => AddBoundaryComponentNames(nestedNamespace, errorBoundarySymbol, builder, cancellationToken),
+                INamedTypeSymbol namedType => AddBoundaryComponentNames(namedType, errorBoundarySymbol, builder),
+                _ => false
+            };
         }
+
+        return found;
     }
 
-    private static void AddBoundaryComponentNames(
-        INamedTypeSymbol namedType,
-        INamedTypeSymbol errorBoundarySymbol,
-        ImmutableHashSet<string>.Builder builder)
+    private static bool AddBoundaryComponentNames(INamedTypeSymbol namedType, INamedTypeSymbol errorBoundarySymbol, ImmutableHashSet<string>.Builder builder)
     {
-        if (namedType.TypeKind == TypeKind.Class && namedType.InheritsFromOrEquals(errorBoundarySymbol))
+        var found = namedType.TypeKind == TypeKind.Class && namedType.InheritsFromOrEquals(errorBoundarySymbol);
+        if (found)
         {
             builder.Add(namedType.Name);
         }
 
         foreach (var nestedType in namedType.GetTypeMembers())
         {
-            AddBoundaryComponentNames(nestedType, errorBoundarySymbol, builder);
+            found |= AddBoundaryComponentNames(nestedType, errorBoundarySymbol, builder);
         }
+
+        return found;
     }
 
     private static RazorMarkupAnalysis? TryGetRazorMarkupAnalysis(
@@ -1618,6 +1674,10 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return null;
     }
 
+    // Only the override renders the component; an overload with the same name must not replace its analysis.
+    private static bool IsBuildRenderTreeOverride(IMethodSymbol methodSymbol) =>
+        methodSymbol is { Name: "BuildRenderTree", IsOverride: true };
+
     private static bool IsRenderMethod(IMethodSymbol methodSymbol)
     {
         if (methodSymbol.IsImplicitlyDeclared || !methodSymbol.ReturnsVoid)
@@ -1647,6 +1707,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         MethodDeclarationSyntax methodDeclaration,
         IMethodSymbol methodSymbol,
         SemanticModel semanticModel,
+        AnalyzerSettings settings,
         CancellationToken cancellationToken)
     {
         var callees = ImmutableHashSet.CreateBuilder<IMethodSymbol>(SymbolEqualityComparer.Default);
@@ -1673,13 +1734,13 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         foreach (var invocation in GetLocalMemberInvocations(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken))
         {
-            if (IsFailureProneOperationMeaningfullyHandled(invocation, semanticModel, methodSymbol, cancellationToken))
+            if (IsFailureProneOperationMeaningfullyHandled(invocation, semanticModel, cancellationToken))
             {
                 continue;
             }
 
             var callee = GetInvokedMemberMethod(invocation, semanticModel, methodSymbol.ContainingType, cancellationToken);
-            if (callee is not null)
+            if (callee is not null && !IsFireAndForgetCall(invocation, callee))
             {
                 unhandledFailureProneCallees.Add(callee);
             }
@@ -1693,7 +1754,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             cancellationToken);
 
         return new MethodAnalysis(
-            hasTryCatch: MethodContainsTryCatch(methodDeclaration),
+            hasTryCatch: MethodContainsTryCatch(methodDeclaration, semanticModel, cancellationToken),
             callees: callees.ToImmutable(),
             delegatedMethod: GetDelegatedMethod(methodDeclaration, semanticModel, methodSymbol.ContainingType, cancellationToken),
             isLifecycleMethod: IsLifecycleMethod(methodSymbol),
@@ -1704,26 +1765,28 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 semanticModel,
                 methodSymbol.ContainingType,
                 treatExplicitThrowsAsFailureProne: !IsLifecycleMethod(methodSymbol),
+                settings,
                 cancellationToken),
             hasFailureProneOperationExcludingExplicitThrows: HasFailureProneOperation(
                 methodDeclaration,
                 semanticModel,
                 methodSymbol.ContainingType,
                 treatExplicitThrowsAsFailureProne: false,
+                settings,
                 cancellationToken),
             hasUnhandledFailureProneOperation: HasUnhandledFailureProneOperation(
                 methodDeclaration,
                 semanticModel,
-                methodSymbol,
                 methodSymbol.ContainingType,
                 treatExplicitThrowsAsFailureProne: !IsLifecycleMethod(methodSymbol),
+                settings,
                 cancellationToken),
             hasUnhandledFailureProneOperationExcludingExplicitThrows: HasUnhandledFailureProneOperation(
                 methodDeclaration,
                 semanticModel,
-                methodSymbol,
                 methodSymbol.ContainingType,
                 treatExplicitThrowsAsFailureProne: false,
+                settings,
                 cancellationToken),
             hasJsInteropCalls: jsInteropCalls.Length > 0,
             hasUnhandledJsInteropCalls: unhandledJsInteropCalls.Length > 0,
@@ -1769,6 +1832,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         SemanticModel semanticModel,
         INamedTypeSymbol containingType,
         bool treatExplicitThrowsAsFailureProne,
+        AnalyzerSettings settings,
         CancellationToken cancellationToken)
     {
         var rootNode = GetMethodExecutableRoot(methodDeclaration);
@@ -1786,11 +1850,11 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     return true;
 
                 case AwaitExpressionSyntax awaitExpression
-                    when IsFailureProneAwaitExpression(awaitExpression, semanticModel, containingType, cancellationToken):
+                    when IsFailureProneAwaitExpression(awaitExpression, semanticModel, containingType, settings, cancellationToken):
                     return true;
 
                 case InvocationExpressionSyntax invocation
-                    when IsFailureProneInvocation(invocation, semanticModel, containingType, cancellationToken, isAwaited: false):
+                    when IsFailureProneInvocation(invocation, semanticModel, containingType, settings, cancellationToken, isAwaited: false):
                     return true;
             }
         }
@@ -1801,12 +1865,23 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static bool HasUnhandledFailureProneOperation(
         MethodDeclarationSyntax methodDeclaration,
         SemanticModel semanticModel,
-        IMethodSymbol methodSymbol,
         INamedTypeSymbol containingType,
         bool treatExplicitThrowsAsFailureProne,
+        AnalyzerSettings settings,
+        CancellationToken cancellationToken) =>
+        HasUnhandledFailureProneOperationIn(GetMethodExecutableRoot(methodDeclaration), semanticModel, containingType, treatExplicitThrowsAsFailureProne, settings, cancellationToken);
+
+    /// <summary>
+    /// True when the method or lambda body performs failure-prone work that no reporting catch handles. Nested functions are skipped.
+    /// </summary>
+    internal static bool HasUnhandledFailureProneOperationIn(
+        SyntaxNode? rootNode,
+        SemanticModel semanticModel,
+        INamedTypeSymbol containingType,
+        bool treatExplicitThrowsAsFailureProne,
+        AnalyzerSettings settings,
         CancellationToken cancellationToken)
     {
-        var rootNode = GetMethodExecutableRoot(methodDeclaration);
         if (rootNode is null)
         {
             return false;
@@ -1816,19 +1891,19 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         {
             switch (node)
             {
-                case ThrowStatementSyntax when treatExplicitThrowsAsFailureProne && !IsFailureProneOperationMeaningfullyHandled(node, semanticModel, methodSymbol, cancellationToken):
-                case ThrowExpressionSyntax when treatExplicitThrowsAsFailureProne && !IsFailureProneOperationMeaningfullyHandled(node, semanticModel, methodSymbol, cancellationToken):
+                case ThrowStatementSyntax when treatExplicitThrowsAsFailureProne && !IsFailureProneOperationMeaningfullyHandled(node, semanticModel, cancellationToken):
+                case ThrowExpressionSyntax when treatExplicitThrowsAsFailureProne && !IsFailureProneOperationMeaningfullyHandled(node, semanticModel, cancellationToken):
                     return true;
 
                 case AwaitExpressionSyntax awaitExpression
-                    when IsFailureProneAwaitExpression(awaitExpression, semanticModel, containingType, cancellationToken) &&
-                         !IsFailureProneOperationMeaningfullyHandled(awaitExpression, semanticModel, methodSymbol, cancellationToken):
+                    when IsFailureProneAwaitExpression(awaitExpression, semanticModel, containingType, settings, cancellationToken) &&
+                         !IsFailureProneOperationMeaningfullyHandled(awaitExpression, semanticModel, cancellationToken):
                     return true;
 
                 case InvocationExpressionSyntax invocation
-                    when invocation.Ancestors().OfType<AwaitExpressionSyntax>().FirstOrDefault() is null &&
-                         IsFailureProneInvocation(invocation, semanticModel, containingType, cancellationToken, isAwaited: false) &&
-                         !IsFailureProneOperationMeaningfullyHandled(invocation, semanticModel, methodSymbol, cancellationToken):
+                    when !invocation.Ancestors().OfType<AwaitExpressionSyntax>().Any() &&
+                         IsFailureProneInvocation(invocation, semanticModel, containingType, settings, cancellationToken, isAwaited: false) &&
+                         !IsFailureProneOperationMeaningfullyHandled(invocation, semanticModel, cancellationToken):
                     return true;
             }
         }
@@ -1840,6 +1915,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         AwaitExpressionSyntax awaitExpression,
         SemanticModel semanticModel,
         INamedTypeSymbol containingType,
+        AnalyzerSettings settings,
         CancellationToken cancellationToken)
     {
         var expression = awaitExpression.Expression;
@@ -1850,20 +1926,39 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         if (expression is InvocationExpressionSyntax invocation)
         {
-            return IsFailureProneInvocation(invocation, semanticModel, containingType, cancellationToken, isAwaited: true);
+            // In `await A().B()`, B may pass A's task through, so A's failure surfaces at this await too.
+            for (ExpressionSyntax? current = invocation; current is InvocationExpressionSyntax chained;
+                 current = (chained.Expression as MemberAccessExpressionSyntax)?.Expression)
+            {
+                if (IsFailureProneInvocation(chained, semanticModel, containingType, settings, cancellationToken, isAwaited: true))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
-        return !IsKnownCompletedTaskExpression(expression, semanticModel, cancellationToken);
+        // Awaiting a stored task of a safe type, such as a cascading Task<AuthenticationState>, cannot fail on its own.
+        if (semanticModel.GetTypeInfo(expression, cancellationToken).Type is INamedTypeSymbol { TypeArguments.Length: 1 } awaitedType &&
+            settings.IsSafeType(awaitedType.TypeArguments[0]))
+        {
+            return false;
+        }
+
+        return settings.UnknownAwaitsAreFailureProne && !IsKnownCompletedTaskExpression(expression, semanticModel, cancellationToken);
     }
 
-    private static bool IsFailureProneInvocation(
+    internal static bool IsFailureProneInvocation(
         InvocationExpressionSyntax invocation,
         SemanticModel semanticModel,
         INamedTypeSymbol containingType,
+        AnalyzerSettings settings,
         CancellationToken cancellationToken,
         bool isAwaited)
     {
-        if (GetInvokedMemberMethod(invocation, semanticModel, containingType, cancellationToken) is not null)
+        if (GetInvokedMemberMethod(invocation, semanticModel, containingType, cancellationToken) is not null ||
+            IsInFailureHandlingChain(invocation, settings))
         {
             return false;
         }
@@ -1871,21 +1966,120 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
             IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken))
         {
-            return true;
+            return !IsBuiltInBrowserCall(invocation);
         }
 
         if (TryGetSymbol(invocation, semanticModel, cancellationToken) is not IMethodSymbol methodSymbol)
         {
-            return isAwaited;
+            return isAwaited && settings.UnknownAwaitsAreFailureProne;
         }
 
         methodSymbol = NormalizeMethodSymbol(methodSymbol);
-        if (IsJsInteropMethod(methodSymbol) || IsKnownLowRiskInvocation(invocation, methodSymbol))
+        if (IsJsInteropMethod(methodSymbol))
         {
-            return IsJsInteropMethod(methodSymbol);
+            return !IsBuiltInBrowserCall(invocation);
         }
 
-        return isAwaited || IsOperationalExternalInvocation(invocation, methodSymbol, semanticModel, cancellationToken);
+        if (IsKnownLowRiskInvocation(invocation, methodSymbol))
+        {
+            return false;
+        }
+
+        var receiverType = TryGetInvocationReceiverType(invocation, methodSymbol, semanticModel, cancellationToken);
+        if (settings.IsSafeType(methodSymbol.ContainingType) ||
+            settings.IsSafeType(receiverType) ||
+            settings.IsSafeResultType(methodSymbol.ReturnType) ||
+            IsUiNotificationType(methodSymbol.ContainingType) ||
+            IsUiNotificationType(receiverType))
+        {
+            return false;
+        }
+
+        // Project code is judged by what it does, one level deep; everything else needs evidence of failure.
+        if (settings.FollowSourceCalls && settings.TryGetSourceBody(methodSymbol, cancellationToken) is { } calleeBody)
+        {
+            return settings.GetOrAddFollowedCall(methodSymbol, _ =>
+            {
+                var calleeModel = settings.GetSemanticModel(calleeBody.SyntaxTree);
+                var calleeType = calleeModel.GetEnclosingSymbol(calleeBody.SpanStart, cancellationToken)?.ContainingType ?? methodSymbol.ContainingType;
+                // A deliberate throw in project code (validation, a redirect) is design, not evidence of an external failure.
+                return HasUnhandledFailureProneOperationIn(calleeBody, calleeModel, calleeType, treatExplicitThrowsAsFailureProne: false, settings.ForFollowedCallee(), cancellationToken);
+            });
+        }
+
+        return IsKnownIoInvocation(methodSymbol, receiverType) ||
+            IsOperationalExternalInvocation(invocation, methodSymbol, semanticModel, settings, cancellationToken) ||
+            (isAwaited && settings.UnknownAwaitsAreFailureProne);
+    }
+
+    /// <summary>
+    /// APIs that perform I/O or parse external input and throw on failure: HTTP, EF Core, streams and files, JSON, SignalR, browser files.
+    /// </summary>
+    private static bool IsKnownIoInvocation(IMethodSymbol methodSymbol, ITypeSymbol? receiverType)
+    {
+        // Creating or disposing a context or connection object performs no query.
+        return methodSymbol.Name is not ("CreateDbContext" or "CreateDbContextAsync" or "Dispose" or "DisposeAsync") &&
+            (IsIoType(methodSymbol.ContainingType) || IsIoType(receiverType));
+
+        static bool IsIoType(ITypeSymbol? type)
+        {
+            for (var current = type; current is not null; current = current.BaseType)
+            {
+                var containingNamespace = current.ContainingNamespace?.ToDisplayString() ?? string.Empty;
+                if (containingNamespace.StartsWith("Microsoft.EntityFrameworkCore", StringComparison.Ordinal) ||
+                    containingNamespace.StartsWith("Microsoft.AspNetCore.SignalR.Client", StringComparison.Ordinal) ||
+                    containingNamespace + "." + current.Name is "System.Net.Http.HttpClient" or "System.Net.Http.HttpMessageInvoker" or "System.Net.Http.HttpContent" or
+                        "System.Net.Http.HttpResponseMessage" or "System.Net.Http.Json.HttpClientJsonExtensions" or
+                        "System.Net.Http.Json.HttpContentJsonExtensions" or "System.IO.Stream" or "System.IO.File" or
+                        "System.IO.Directory" or "System.Text.Json.JsonSerializer" or
+                        "Microsoft.AspNetCore.Components.Forms.IBrowserFile")
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    // Toast and snackbar services only change in-memory UI state. "Notification" is excluded: notification services often send email or push.
+    private static bool IsUiNotificationType(ITypeSymbol? type) =>
+        type?.Name is { } name &&
+        (name.IndexOf("Toast", StringComparison.Ordinal) >= 0 || name.IndexOf("Snackbar", StringComparison.Ordinal) >= 0);
+
+    /// <summary>
+    /// True when the invocation is, or is the receiver chain of, a configured failure-handling method such as
+    /// <c>repository.LoadAsync().OnFailureAsync(...)</c>, which converts failures into values.
+    /// </summary>
+    private static bool IsInFailureHandlingChain(InvocationExpressionSyntax invocation, AnalyzerSettings settings)
+    {
+        if (settings.FailureHandlingMethods.Count == 0)
+        {
+            return false;
+        }
+
+        for (var current = invocation; ;)
+        {
+            var name = current.Expression switch
+            {
+                MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText,
+                SimpleNameSyntax simpleName => simpleName.Identifier.ValueText,
+                _ => null
+            };
+            if (name is not null && settings.FailureHandlingMethods.Contains(name))
+            {
+                return true;
+            }
+
+            if (current.Parent is not MemberAccessExpressionSyntax memberAccessParent ||
+                memberAccessParent.Expression != current ||
+                memberAccessParent.Parent is not InvocationExpressionSyntax outerInvocation)
+            {
+                return false;
+            }
+
+            current = outerInvocation;
+        }
     }
 
     private static bool IsKnownCompletedTaskExpression(
@@ -1918,7 +2112,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     "System.Nullable" or
                     "System.Type" or
                     "System.String" or
-                    "System.Guid" ||
+                    "System.Guid" or
+                    "System.Threading.PeriodicTimer" ||
                 name.StartsWith("System.Linq.", StringComparison.Ordinal) ||
                 name.StartsWith("System.Reflection.", StringComparison.Ordinal) ||
                 name.StartsWith("System.Collections.", StringComparison.Ordinal)))
@@ -1936,28 +2131,13 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         InvocationExpressionSyntax invocation,
         IMethodSymbol methodSymbol,
         SemanticModel semanticModel,
+        AnalyzerSettings settings,
         CancellationToken cancellationToken)
     {
-        if (!IsOperationalMethodName(methodSymbol.Name))
-        {
-            return false;
-        }
-
-        if (TryGetInvocationReceiverType(invocation, methodSymbol, semanticModel, cancellationToken) is not INamedTypeSymbol receiverType ||
-            IsKnownLowRiskReceiverType(receiverType))
-        {
-            return false;
-        }
-
-        return GetTypeMetadataNames(receiverType).Any(static name =>
-            name.EndsWith("Repository", StringComparison.Ordinal) ||
-            name.EndsWith("Service", StringComparison.Ordinal) ||
-            name.EndsWith("Client", StringComparison.Ordinal) ||
-            name.EndsWith("Provider", StringComparison.Ordinal) ||
-            name.EndsWith("Manager", StringComparison.Ordinal) ||
-            name.EndsWith("Store", StringComparison.Ordinal) ||
-            name.EndsWith("Context", StringComparison.Ordinal) ||
-            name.EndsWith("DbContext", StringComparison.Ordinal));
+        return settings.FailureProneMethodPrefixes.Any(prefix => methodSymbol.Name.StartsWith(prefix, StringComparison.Ordinal)) &&
+               TryGetInvocationReceiverType(invocation, methodSymbol, semanticModel, cancellationToken) is INamedTypeSymbol receiverType &&
+               !IsKnownLowRiskReceiverType(receiverType) &&
+               GetTypeMetadataNames(receiverType).Any(name => settings.FailureProneTypeSuffixes.Any(suffix => name.EndsWith(suffix, StringComparison.Ordinal)));
     }
 
     private static bool IsKnownLowRiskReceiverType(INamedTypeSymbol receiverType) =>
@@ -1966,28 +2146,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 "System.IServiceProvider" or
                 "System.IFormatProvider" or
                 "System.Globalization.CultureInfo");
-
-    private static bool IsOperationalMethodName(string methodName) =>
-        methodName.StartsWith("Get", StringComparison.Ordinal) ||
-        methodName.StartsWith("Load", StringComparison.Ordinal) ||
-        methodName.StartsWith("Save", StringComparison.Ordinal) ||
-        methodName.StartsWith("Search", StringComparison.Ordinal) ||
-        methodName.StartsWith("Export", StringComparison.Ordinal) ||
-        methodName.StartsWith("Import", StringComparison.Ordinal) ||
-        methodName.StartsWith("Open", StringComparison.Ordinal) ||
-        methodName.StartsWith("Download", StringComparison.Ordinal) ||
-        methodName.StartsWith("Upload", StringComparison.Ordinal) ||
-        methodName.StartsWith("Refresh", StringComparison.Ordinal) ||
-        methodName.StartsWith("Invoke", StringComparison.Ordinal) ||
-        methodName.StartsWith("Send", StringComparison.Ordinal) ||
-        methodName.StartsWith("Submit", StringComparison.Ordinal) ||
-        methodName.StartsWith("Create", StringComparison.Ordinal) ||
-        methodName.StartsWith("Update", StringComparison.Ordinal) ||
-        methodName.StartsWith("Patch", StringComparison.Ordinal) ||
-        methodName.StartsWith("Delete", StringComparison.Ordinal) ||
-        methodName.StartsWith("Remove", StringComparison.Ordinal) ||
-        methodName.StartsWith("Archive", StringComparison.Ordinal) ||
-        methodName.StartsWith("Restore", StringComparison.Ordinal);
 
     private static ITypeSymbol? TryGetInvocationReceiverType(
         InvocationExpressionSyntax invocation,
@@ -2859,7 +3017,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
             if (componentType is not null && componentType.InheritsFromOrEquals(errorBoundarySymbol))
             {
-                var hasBuiltInErrorContent = BoundaryTypeHasBuiltInErrorContent(componentType, errorBoundarySymbol, cancellationToken);
+                var hasBuiltInErrorContent = BoundaryTypeHasBuiltInErrorContent(componentType, cancellationToken);
                 return new RootAnalysisState(ignoredRoot: false, boundaryRoot: true, rootBoundaryComponent: componentType, rootBoundaryHasBuiltInErrorContent: hasBuiltInErrorContent, rootLocation, componentType.Name);
             }
 
@@ -3096,18 +3254,38 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         };
     }
 
+    /// <summary>
+    /// Microsoft's ErrorBoundary falls back to a default UI. Any other ErrorBoundaryBase implementation, or a subclass whose
+    /// BuildRenderTree is compiled into a referenced assembly, renders its own error UI.
+    /// </summary>
     private static bool BoundaryTypeHasBuiltInErrorContent(
         INamedTypeSymbol boundaryType,
-        INamedTypeSymbol errorBoundarySymbol,
         CancellationToken cancellationToken)
     {
-        if (SymbolEqualityComparer.Default.Equals(boundaryType, errorBoundarySymbol))
+        const string defaultBoundaryName = "Microsoft.AspNetCore.Components.Web.ErrorBoundary";
+        if (boundaryType.ToDisplayString() == defaultBoundaryName)
         {
             return false;
         }
 
+        var current = boundaryType.BaseType;
+        while (current is not null && current.ToDisplayString() != defaultBoundaryName)
+        {
+            current = current.BaseType;
+        }
+
+        if (current is null)
+        {
+            return true;
+        }
+
         foreach (var buildRenderTreeMethod in boundaryType.GetMembers("BuildRenderTree").OfType<IMethodSymbol>())
         {
+            if (buildRenderTreeMethod.DeclaringSyntaxReferences.IsEmpty)
+            {
+                return true;
+            }
+
             foreach (var syntaxReference in buildRenderTreeMethod.DeclaringSyntaxReferences)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -3373,30 +3551,18 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
 
         var seen = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
-        foreach (var expression in methodDeclaration.Body.DescendantNodesAndSelf().OfType<ExpressionSyntax>())
+        // Only a name can resolve to BuildRenderTree; binding every expression of generated render code is far costlier.
+        foreach (var name in methodDeclaration.Body.DescendantNodes().OfType<SimpleNameSyntax>().Where(static name => name.Identifier.ValueText == "BuildRenderTree"))
         {
-            var symbol = TryGetSymbol(expression, semanticModel, cancellationToken);
-
-            if (symbol is not IMethodSymbol methodSymbol)
+            if (TryGetSymbol(name, semanticModel, cancellationToken) is IMethodSymbol symbol &&
+                NormalizeMethodSymbol(symbol) is { Name: "BuildRenderTree" } methodSymbol &&
+                NormalizeComponentSymbol(methodSymbol.ContainingType) is var referencedComponent &&
+                IsComponent(referencedComponent, componentBaseSymbol) &&
+                !SymbolEqualityComparer.Default.Equals(referencedComponent, NormalizeComponentSymbol(containingType)) &&
+                seen.Add(referencedComponent))
             {
-                continue;
+                yield return referencedComponent;
             }
-
-            methodSymbol = NormalizeMethodSymbol(methodSymbol);
-            if (methodSymbol.Name != "BuildRenderTree")
-            {
-                continue;
-            }
-
-            var referencedComponent = NormalizeComponentSymbol(methodSymbol.ContainingType);
-            if (!IsComponent(referencedComponent, componentBaseSymbol) ||
-                SymbolEqualityComparer.Default.Equals(referencedComponent, NormalizeComponentSymbol(containingType)) ||
-                !seen.Add(referencedComponent))
-            {
-                continue;
-            }
-
-            yield return referencedComponent;
         }
     }
 
@@ -3443,8 +3609,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
+    // The template's Routes component belongs to the app (for example MyApp.Components.Routes), so match it by name, or Blazor's Router itself.
     private static bool IsRoutesComponent(INamedTypeSymbol componentType) =>
-        GetTypeMetadataNames(componentType).Any(static name => name == "Microsoft.AspNetCore.Components.Routing.Routes");
+        componentType.Name == "Routes" || GetTypeMetadataNames(componentType).Any(static name => name == "Microsoft.AspNetCore.Components.Routing.Router");
 
     private static INamedTypeSymbol? TryGetOpenedComponentType(
         InvocationExpressionSyntax invocation,
@@ -3476,7 +3643,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         foreach (var invocation in GetLocalMemberInvocations(methodDeclaration, semanticModel, containingType, cancellationToken))
         {
             var methodSymbol = GetInvokedMemberMethod(invocation, semanticModel, containingType, cancellationToken);
-            if (methodSymbol is null || !seen.Add(methodSymbol))
+            if (methodSymbol is null || IsFireAndForgetCall(invocation, methodSymbol) || !seen.Add(methodSymbol))
             {
                 continue;
             }
@@ -3484,6 +3651,13 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             yield return methodSymbol;
         }
     }
+
+    /// <summary>
+    /// A discarded or unawaited call to an async method never throws into its caller: its failure stays in the task, which NTBA0011 reports.
+    /// </summary>
+    private static bool IsFireAndForgetCall(InvocationExpressionSyntax invocation, IMethodSymbol callee) =>
+        callee.IsAsync &&
+        invocation.Parent is ExpressionStatementSyntax or AssignmentExpressionSyntax { Left: IdentifierNameSyntax { Identifier.ValueText: "_" } };
 
     private static IEnumerable<InvocationExpressionSyntax> GetLocalMemberInvocations(
         MethodDeclarationSyntax methodDeclaration,
@@ -3530,7 +3704,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         };
     }
 
-    private static IMethodSymbol? GetInvokedMemberMethod(
+    internal static IMethodSymbol? GetInvokedMemberMethod(
         ExpressionSyntax expression,
         SemanticModel semanticModel,
         INamedTypeSymbol containingType,
@@ -3612,6 +3786,14 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         }
     }
 
+    /// <summary>
+    /// Window built-ins such as <c>confirm</c> or <c>history.back</c> run no application script, so they cannot throw a JSException.
+    /// </summary>
+    private static bool IsBuiltInBrowserCall(InvocationExpressionSyntax invocation) =>
+        invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression is LiteralExpressionSyntax { Token.ValueText: var identifier } &&
+        identifier is "alert" or "confirm" or "prompt" or "toString" or "history.back" or "history.forward" or "history.go" or
+            "console.log" or "console.info" or "console.warn" or "console.error" or "console.debug";
+
     private static bool IsKnownJsInteropInvocation(
         MemberAccessExpressionSyntax memberAccess,
         SemanticModel semanticModel,
@@ -3654,7 +3836,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         var builder = ImmutableArray.CreateBuilder<InvocationExpressionSyntax>();
         foreach (var invocation in GetJsInteropInvocations(methodDeclaration, semanticModel, cancellationToken))
         {
-            if (IsJsInteropInvocationMeaningfullyHandled(invocation, semanticModel, cancellationToken))
+            if (IsBuiltInBrowserCall(invocation) ||
+                IsJsInteropInvocationMeaningfullyHandled(invocation, semanticModel, methodSymbol, cancellationToken))
             {
                 continue;
             }
@@ -3668,6 +3851,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static bool IsJsInteropInvocationMeaningfullyHandled(
         InvocationExpressionSyntax invocation,
         SemanticModel semanticModel,
+        IMethodSymbol methodSymbol,
         CancellationToken cancellationToken)
     {
         foreach (var tryStatement in invocation.Ancestors().OfType<TryStatementSyntax>())
@@ -3677,12 +3861,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 continue;
             }
 
-            if (tryStatement.Catches.Any(catchClause => CatchClauseLogsOrRethrows(catchClause, semanticModel, cancellationToken)))
+            if (tryStatement.Catches.Any(catchClause => CatchClauseHandlesException(catchClause, semanticModel, cancellationToken)))
             {
                 return true;
             }
 
-            if (IsExpectedJsDisconnectedInteropCatch(tryStatement, invocation, semanticModel, cancellationToken))
+            if (IsExpectedJsDisconnectedCleanupCatch(tryStatement, invocation, semanticModel, methodSymbol, cancellationToken))
             {
                 return true;
             }
@@ -3694,28 +3878,17 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
     private static bool IsFailureProneOperationMeaningfullyHandled(
         SyntaxNode operation,
         SemanticModel semanticModel,
-        IMethodSymbol methodSymbol,
         CancellationToken cancellationToken)
     {
-        foreach (var tryStatement in operation.Ancestors().OfType<TryStatementSyntax>())
+        // A try outside an enclosing lambda does not protect the lambda body, which runs later.
+        foreach (var tryStatement in operation.Ancestors().TakeWhile(static node => !IsNestedFunctionLike(node)).OfType<TryStatementSyntax>())
         {
             if (!tryStatement.Block.FullSpan.Contains(operation.Span) || tryStatement.Catches.Count == 0)
             {
                 continue;
             }
 
-            if (tryStatement.Catches.Any(catchClause => CatchClauseLogsOrRethrows(catchClause, semanticModel, cancellationToken)))
-            {
-                return true;
-            }
-
-            if (TryGetInvocation(operation) is { } invocation &&
-                IsExpectedJsDisconnectedInteropCatch(tryStatement, invocation, semanticModel, cancellationToken))
-            {
-                return true;
-            }
-
-            if (IsDisposeMethod(methodSymbol) && HasMeaningfulFinallyCleanup(tryStatement.Finally))
+            if (tryStatement.Catches.Any(catchClause => CatchClauseHandlesException(catchClause, semanticModel, cancellationToken)))
             {
                 return true;
             }
@@ -3724,43 +3897,38 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static bool IsExpectedJsDisconnectedInteropCatch(
+    private static bool IsExpectedJsDisconnectedCleanupCatch(
         TryStatementSyntax tryStatement,
         InvocationExpressionSyntax invocation,
         SemanticModel semanticModel,
+        IMethodSymbol methodSymbol,
         CancellationToken cancellationToken)
     {
-        if (!IsJsInteropInvocation(invocation, semanticModel, cancellationToken))
+        return (IsDisposalCleanupMethod(methodSymbol) || DisposesJsObject(tryStatement, semanticModel, cancellationToken)) &&
+            IsJsInteropCall(invocation, semanticModel, cancellationToken) &&
+            IsJsDisconnectedExceptionCatchSet(tryStatement.Catches, semanticModel, cancellationToken);
+    }
+
+    private static bool IsJsDisconnectedExceptionCatchSet(
+        SyntaxList<CatchClauseSyntax> catches,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (catches.Count == 0)
         {
             return false;
         }
 
-        return tryStatement.Catches.Any(catchClause =>
-            catchClause.Declaration?.Type is { } catchType &&
-            IsJsDisconnectedExceptionType(catchType, semanticModel, cancellationToken));
-    }
-
-    private static InvocationExpressionSyntax? TryGetInvocation(SyntaxNode operation) => operation switch
-    {
-        InvocationExpressionSyntax invocation => invocation,
-        AwaitExpressionSyntax { Expression: InvocationExpressionSyntax invocation } => invocation,
-        _ => null
-    };
-
-    private static bool HasMeaningfulFinallyCleanup(FinallyClauseSyntax? finallyClause) =>
-        finallyClause?.Block.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node)).Any(static node =>
-            node is AssignmentExpressionSyntax or InvocationExpressionSyntax) == true;
-
-    private static bool IsJsInteropInvocation(InvocationExpressionSyntax invocation, SemanticModel semanticModel, CancellationToken cancellationToken)
-    {
-        if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
-            IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken))
+        foreach (var catchClause in catches)
         {
-            return true;
+            if (catchClause.Declaration?.Type is not { } catchType ||
+                !IsJsDisconnectedExceptionType(catchType, semanticModel, cancellationToken))
+            {
+                return false;
+            }
         }
 
-        return TryGetSymbol(invocation, semanticModel, cancellationToken) is IMethodSymbol methodSymbol &&
-               IsJsInteropMethod(methodSymbol);
+        return true;
     }
 
     private static bool IsJsInteropMethod(IMethodSymbol methodSymbol)
@@ -4250,8 +4418,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         var locations = ImmutableArray.CreateBuilder<Location>();
         foreach (var catchClause in methodDeclaration.Body.DescendantNodes(static node => !IsNestedFunctionLike(node)).OfType<CatchClauseSyntax>())
         {
-            if (CatchClauseLogsOrRethrows(catchClause, semanticModel, cancellationToken) ||
-                IsExpectedJsDisconnectedInteropCatch(catchClause, semanticModel, cancellationToken))
+            if (CatchClauseObservesException(catchClause, semanticModel, cancellationToken))
             {
                 continue;
             }
@@ -4262,33 +4429,109 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return locations.ToImmutable();
     }
 
-    private static bool CatchClauseLogsOrRethrows(
+    /// <summary>
+    /// NTBA0008: the catch reports the exception, rethrows it, or swallows an expected cancellation or disconnect.
+    /// </summary>
+    private static bool CatchClauseObservesException(
+        CatchClauseSyntax catchClause,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken) =>
+        CatchClauseThrows(catchClause) ||
+        !IsGeneralCatch(catchClause, semanticModel, cancellationToken) ||
+        IsExpectedSwallowCatch(catchClause, semanticModel, cancellationToken) ||
+        CatchClauseReportsException(catchClause, semanticModel, cancellationToken) ||
+        CatchClauseSurfacesFailure(catchClause, semanticModel, cancellationToken);
+
+    /// <summary>
+    /// The catch tells the user: it calls a toast or snackbar, or stores an error message in component state for the UI to show.
+    /// A catch that only resets state or returns a default still hides the failure.
+    /// </summary>
+    // A message for the user: a non-empty string literal, an interpolated string, or text taken from the caught exception.
+    // Resetting state to null, "" or string.Empty tells the user nothing.
+    private static bool IsErrorMessage(ExpressionSyntax value, string? exceptionName) => value switch
+    {
+        LiteralExpressionSyntax literal => literal.IsKind(SyntaxKind.StringLiteralExpression) && literal.Token.ValueText.Length > 0,
+        InterpolatedStringExpressionSyntax => true,
+        _ => exceptionName is { Length: > 0 } &&
+             value.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>().Any(identifier => identifier.Identifier.ValueText == exceptionName)
+    };
+
+    private static bool CatchClauseSurfacesFailure(CatchClauseSyntax catchClause, SemanticModel semanticModel, CancellationToken cancellationToken)
+    {
+        foreach (var node in catchClause.Block.DescendantNodes(static node => !IsNestedFunctionLike(node)))
+        {
+            switch (node)
+            {
+                case InvocationExpressionSyntax invocation
+                    when TryGetSymbol(invocation, semanticModel, cancellationToken) is IMethodSymbol method && IsUiNotificationType(method.ContainingType):
+                    return true;
+                case AssignmentExpressionSyntax assignment
+                    when TryGetSymbol(assignment.Left, semanticModel, cancellationToken) is IFieldSymbol or IPropertySymbol &&
+                         IsErrorMessage(assignment.Right, catchClause.Declaration?.Identifier.ValueText):
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// NTBA0002-NTBA0005: the catch contains the failure. A catch that throws propagates it, and a catch that only absorbs
+    /// cancellation or disconnects leaves other failures unhandled; whether a containing catch logs is NTBA0008's concern.
+    /// </summary>
+    private static bool CatchClauseHandlesException(
+        CatchClauseSyntax catchClause,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken) =>
+        IsExpectedJsDisconnectedCleanupCatch(catchClause, semanticModel, cancellationToken) ||
+        (!CatchClauseThrows(catchClause) && !IsExpectedSwallowCatch(catchClause, semanticModel, cancellationToken));
+
+    private static bool CatchClauseThrows(CatchClauseSyntax catchClause) =>
+        catchClause.Block.DescendantNodes(static node => !IsNestedFunctionLike(node)).OfType<ThrowStatementSyntax>().Any();
+
+    // A catch of a specific exception type is a deliberate decision; only `catch` and `catch (Exception)` can hide unknown failures.
+    private static bool IsGeneralCatch(CatchClauseSyntax catchClause, SemanticModel semanticModel, CancellationToken cancellationToken) =>
+        catchClause.Declaration?.Type is not { } catchType ||
+        TryGetSymbol(catchType, semanticModel, cancellationToken)?.ToDisplayString() is null or "System.Exception";
+
+    /// <summary>
+    /// The catch passes the caught exception to a call such as a logger, telemetry client, notification service, or DispatchExceptionAsync.
+    /// </summary>
+    private static bool CatchClauseReportsException(
         CatchClauseSyntax catchClause,
         SemanticModel semanticModel,
         CancellationToken cancellationToken)
     {
-        if (catchClause.Block.DescendantNodesAndSelf().OfType<ThrowStatementSyntax>().Any())
+        var caughtExceptionName = catchClause.Declaration?.Identifier.ValueText;
+        return catchClause.Block.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node))
+            .OfType<InvocationExpressionSyntax>()
+            .Any(invocation => InvocationReportsCaughtException(invocation, caughtExceptionName, semanticModel, cancellationToken));
+    }
+
+    private static bool IsExpectedSwallowCatch(
+        CatchClauseSyntax catchClause,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
+    {
+        if (catchClause.Filter?.FilterExpression.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>()
+                .Any(static identifier => identifier.Identifier.ValueText == "IsCancellationRequested") == true)
         {
             return true;
         }
 
-        var caughtExceptionName = catchClause.Declaration?.Identifier.ValueText;
-        foreach (var invocation in catchClause.Block.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node)).OfType<InvocationExpressionSyntax>())
+        if (catchClause.Declaration?.Type is not { } catchType)
         {
-            if (!InvocationReportsCaughtException(invocation, caughtExceptionName, semanticModel, cancellationToken))
-            {
-                continue;
-            }
+            return false;
+        }
 
-            if (invocation.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: var memberName } &&
-                (memberName.StartsWith("Log", StringComparison.Ordinal) || memberName is "TrackException" or "CaptureException" or "ReportException"))
-            {
-                return true;
-            }
+        if (IsJsDisconnectedExceptionType(catchType, semanticModel, cancellationToken))
+        {
+            return true;
+        }
 
-            var symbol = TryGetSymbol(invocation, semanticModel, cancellationToken);
-            if (symbol is IMethodSymbol methodSymbol &&
-                IsLoggingOrTelemetryMethod(methodSymbol))
+        for (var current = TryGetSymbol(catchType, semanticModel, cancellationToken) as INamedTypeSymbol; current is not null; current = current.BaseType)
+        {
+            if (current.ToDisplayString() == "System.OperationCanceledException")
             {
                 return true;
             }
@@ -4297,26 +4540,44 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         return false;
     }
 
-    private static bool IsExpectedJsDisconnectedInteropCatch(
+    private static bool IsExpectedJsDisconnectedCleanupCatch(
         CatchClauseSyntax catchClause,
         SemanticModel semanticModel,
         CancellationToken cancellationToken)
     {
-        if (catchClause.Declaration?.Type is null ||
-            !IsJsDisconnectedExceptionType(catchClause.Declaration.Type, semanticModel, cancellationToken))
+        if (catchClause.Declaration?.Type is not { } catchType ||
+            !IsJsDisconnectedExceptionType(catchType, semanticModel, cancellationToken) ||
+            catchClause.Ancestors().OfType<TryStatementSyntax>().FirstOrDefault() is not { } tryStatement)
         {
             return false;
         }
 
-        if (catchClause.Ancestors().OfType<TryStatementSyntax>().FirstOrDefault() is not { } tryStatement)
-        {
-            return false;
-        }
-
-        return tryStatement.Block.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node))
-            .OfType<InvocationExpressionSyntax>()
-            .Any(invocation => IsJsInteropInvocation(invocation, semanticModel, cancellationToken));
+        return DisposesJsObject(tryStatement, semanticModel, cancellationToken) ||
+            (catchClause.FirstAncestorOrSelf<MethodDeclarationSyntax>() is { } methodDeclaration &&
+             TryGetDeclaredMethodSymbol(methodDeclaration, semanticModel, cancellationToken) is IMethodSymbol methodSymbol &&
+             IsDisposalCleanupMethod(NormalizeMethodSymbol(methodSymbol)) &&
+             tryStatement.Block.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node))
+                 .OfType<InvocationExpressionSyntax>()
+                 .Any(invocation => IsJsInteropCall(invocation, semanticModel, cancellationToken)));
     }
+
+    // Disposing an IJSObjectReference marks the try block as JS cleanup, whatever the helper is called.
+    private static bool DisposesJsObject(TryStatementSyntax tryStatement, SemanticModel semanticModel, CancellationToken cancellationToken) =>
+        tryStatement.Block.DescendantNodesAndSelf(static node => !IsNestedFunctionLike(node))
+            .OfType<InvocationExpressionSyntax>()
+            .Any(invocation =>
+                invocation.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "DisposeAsync" } memberAccess &&
+                IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken));
+
+    /// <summary>
+    /// Disposal and its helpers, where Microsoft's documented pattern runs JS cleanup and swallows only JSDisconnectedException.
+    /// </summary>
+    private static bool IsDisposalCleanupMethod(IMethodSymbol methodSymbol) =>
+        IsDisposeMethod(methodSymbol) || methodSymbol.Name is "DisposeAsyncCore" or "DisposeCore";
+
+    private static bool IsJsInteropCall(InvocationExpressionSyntax invocation, SemanticModel semanticModel, CancellationToken cancellationToken) =>
+        (invocation.Expression is MemberAccessExpressionSyntax memberAccess && IsKnownJsInteropInvocation(memberAccess, semanticModel, cancellationToken)) ||
+        (TryGetSymbol(invocation, semanticModel, cancellationToken) is IMethodSymbol methodSymbol && IsJsInteropMethod(NormalizeMethodSymbol(methodSymbol)));
 
     private static bool IsJsDisconnectedExceptionType(
         TypeSyntax typeSyntax,
@@ -4331,16 +4592,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         var typeName = typeSyntax.ToString();
         return typeName.EndsWith("JSDisconnectedException", StringComparison.Ordinal);
-    }
-
-    private static bool IsLoggingOrTelemetryMethod(IMethodSymbol methodSymbol)
-    {
-        if (methodSymbol.Name is "TrackException" or "CaptureException" or "ReportException")
-        {
-            return true;
-        }
-
-        return methodSymbol.Name.StartsWith("Log", StringComparison.Ordinal);
     }
 
     private static bool InvocationReportsCaughtException(
@@ -4492,7 +4743,9 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             return null;
         }
 
-        return TryGetTypeInfo(genericName.TypeArgumentList.Arguments[0], semanticModel, cancellationToken)?.Type as INamedTypeSymbol;
+        return TryGetTypeInfo(genericName.TypeArgumentList.Arguments[0], semanticModel, cancellationToken)?.Type is INamedTypeSymbol componentType
+            ? NormalizeComponentSymbol(componentType)
+            : null;
     }
 
     private static bool IsStaleLayoutBoundaryKeyExpression(
@@ -4752,23 +5005,10 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
     private static INamedTypeSymbol NormalizeComponentSymbol(INamedTypeSymbol componentSymbol) => componentSymbol.OriginalDefinition;
 
-    private static bool MethodContainsTryCatch(MethodDeclarationSyntax methodDeclaration)
-    {
-        if (methodDeclaration.Body is null)
-        {
-            return false;
-        }
-
-        foreach (var tryStatement in methodDeclaration.Body.DescendantNodes(static node => !IsNestedFunctionLike(node)).OfType<TryStatementSyntax>())
-        {
-            if (tryStatement.Catches.Count > 0)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    private static bool MethodContainsTryCatch(MethodDeclarationSyntax methodDeclaration, SemanticModel semanticModel, CancellationToken cancellationToken) =>
+        methodDeclaration.Body?.DescendantNodes(static node => !IsNestedFunctionLike(node))
+            .OfType<CatchClauseSyntax>()
+            .Any(catchClause => CatchClauseHandlesException(catchClause, semanticModel, cancellationToken)) == true;
 
     private static bool IsNestedFunctionLike(SyntaxNode node) =>
         node is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax;
@@ -4779,10 +5019,12 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
         private readonly INamedTypeSymbol componentBaseSymbol;
         private readonly INamedTypeSymbol errorBoundarySymbol;
         private readonly INamedTypeSymbol renderModeAttributeSymbol;
+        private readonly ImmutableHashSet<string> knownBoundaryComponentNames;
         private readonly ImmutableDictionary<string, AdditionalText> razorAdditionalFiles;
         private readonly ConcurrentDictionary<string, RazorMarkupAnalysis?> razorMarkupCache;
+        private readonly string? defaultRenderMode;
         private readonly object gate = new();
-        private bool initialized;
+        private volatile bool initialized;
         private HashSet<INamedTypeSymbol> relevantComponents = new(SymbolEqualityComparer.Default);
         private HashSet<INamedTypeSymbol> boundaryProtectedComponents = new(SymbolEqualityComparer.Default);
         private HashSet<INamedTypeSymbol> lifecycleBoundaryProtectedComponents = new(SymbolEqualityComparer.Default);
@@ -4792,15 +5034,19 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             INamedTypeSymbol componentBaseSymbol,
             INamedTypeSymbol errorBoundarySymbol,
             INamedTypeSymbol renderModeAttributeSymbol,
+            ImmutableHashSet<string> knownBoundaryComponentNames,
             ImmutableDictionary<string, AdditionalText> razorAdditionalFiles,
-            ConcurrentDictionary<string, RazorMarkupAnalysis?> razorMarkupCache)
+            ConcurrentDictionary<string, RazorMarkupAnalysis?> razorMarkupCache,
+            string? defaultRenderMode)
         {
             this.compilation = compilation;
             this.componentBaseSymbol = componentBaseSymbol;
             this.errorBoundarySymbol = errorBoundarySymbol;
             this.renderModeAttributeSymbol = renderModeAttributeSymbol;
+            this.knownBoundaryComponentNames = knownBoundaryComponentNames;
             this.razorAdditionalFiles = razorAdditionalFiles;
             this.razorMarkupCache = razorMarkupCache;
+            this.defaultRenderMode = defaultRenderMode;
         }
 
         public bool IsBoundaryProtected(INamedTypeSymbol componentSymbol, CancellationToken cancellationToken)
@@ -4845,20 +5091,16 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                 var componentOwners = new ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>>(SymbolEqualityComparer.Default);
                 var boundaryProtectedComponentOwners = new ConcurrentDictionary<INamedTypeSymbol, ConcurrentDictionary<INamedTypeSymbol, byte>>(SymbolEqualityComparer.Default);
                 var renderTreeAnalyses = new Dictionary<INamedTypeSymbol, RenderTreeAnalysis>(SymbolEqualityComparer.Default);
-                var boundaryComponentNames = allComponentSymbols
-                    .Select(symbol => symbol.Name)
-                    .Concat(GetBoundaryComponentNames(compilation, errorBoundarySymbol))
-                    .ToImmutableHashSet(StringComparer.Ordinal);
 
                 foreach (var component in allComponentSymbols)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     allComponents.TryAdd(component, 0);
 
-                    var declaredRenderMode = GetDeclaredRenderModeKey(component, renderModeAttributeSymbol);
+                    var declaredRenderMode = GetDeclaredRenderModeKey(component, renderModeAttributeSymbol) ?? defaultRenderMode;
                     declaredRenderModes.TryAdd(component, declaredRenderMode);
 
-                    var renderTreeAnalysis = AnalyzeComponentRenderTree(component, boundaryComponentNames, cancellationToken);
+                    var renderTreeAnalysis = AnalyzeComponentRenderTree(component, cancellationToken);
                     renderTreeAnalyses[component] = renderTreeAnalysis;
                     if (renderTreeAnalysis.HasBoundaryRoot ||
                         renderTreeAnalysis.UncoveredRegions.Length > 0 ||
@@ -4905,7 +5147,6 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
 
         private RenderTreeAnalysis AnalyzeComponentRenderTree(
             INamedTypeSymbol componentSymbol,
-            ImmutableHashSet<string> boundaryComponentNames,
             CancellationToken cancellationToken)
         {
             var childComponents = ImmutableHashSet.CreateBuilder<INamedTypeSymbol>(SymbolEqualityComparer.Default);
@@ -4920,7 +5161,7 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
             Location? boundaryRootLocation = null;
             var uncoveredRegions = ImmutableArray.CreateBuilder<InteractiveRenderRegion>();
 
-            foreach (var syntaxReference in componentSymbol.GetMembers("BuildRenderTree").OfType<IMethodSymbol>().SelectMany(static method => method.DeclaringSyntaxReferences))
+            foreach (var syntaxReference in componentSymbol.GetMembers("BuildRenderTree").OfType<IMethodSymbol>().Where(IsBuildRenderTreeOverride).SelectMany(static method => method.DeclaringSyntaxReferences))
             {
                 if (syntaxReference.GetSyntax(cancellationToken) is not MethodDeclarationSyntax methodDeclaration ||
                     methodDeclaration.Body is null)
@@ -4936,7 +5177,8 @@ public sealed class BlazorErrorHandlingAnalyzer : DiagnosticAnalyzer
                     : TryGetRazorMarkupAnalysis(
                         methodDeclaration,
                         NormalizeMethodSymbol(declaredMethod),
-                        boundaryComponentNames,
+                        // Real boundary names only: the markup cache is shared with CollectMethodAnalysis, so both must parse identically.
+                        knownBoundaryComponentNames,
                         razorAdditionalFiles,
                         razorMarkupCache,
                         cancellationToken);

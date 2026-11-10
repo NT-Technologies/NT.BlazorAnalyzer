@@ -441,12 +441,10 @@ public sealed class BlazorErrorHandlingAnalyzerWhiteBoxTests
         Assert.False((bool)AnalyzerWhiteBoxTestHarness.InvokeAnalyzer(
             "BoundaryTypeHasBuiltInErrorContent",
             errorBoundarySymbol,
-            errorBoundarySymbol,
             CancellationToken.None)!);
         Assert.False((bool)AnalyzerWhiteBoxTestHarness.InvokeAnalyzer(
             "BoundaryTypeHasBuiltInErrorContent",
             expressionBodyBoundary,
-            errorBoundarySymbol,
             CancellationToken.None)!);
     }
 
@@ -503,4 +501,39 @@ public sealed class BlazorErrorHandlingAnalyzerWhiteBoxTests
             invocation,
             context.SemanticModel,
             CancellationToken.None)!;
+
+    [Fact]
+    public void GetBoundaryComponentNames_FindsDirectAndIndirectBoundariesInReferencedAssemblies()
+    {
+        var platformReferences = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Select(static path => (MetadataReference)MetadataReference.CreateFromFile(path))
+            .ToArray();
+        var baseLibrary = EmitLibrary("BaseLibrary", "namespace BaseLibrary; public class BaseBoundary : Microsoft.AspNetCore.Components.Web.ErrorBoundary { }", platformReferences);
+        var derivedLibrary = EmitLibrary("DerivedLibrary", "namespace DerivedLibrary; public class IndirectBoundary : BaseLibrary.BaseBoundary { }", [.. platformReferences, baseLibrary]);
+        var unrelatedLibrary = EmitLibrary("UnrelatedLibrary", "namespace UnrelatedLibrary; public class NotABoundary { }", platformReferences);
+        var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+            "Consumer",
+            [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText("namespace Consumer; public class LocalBoundary : DerivedLibrary.IndirectBoundary { }", cancellationToken: TestContext.Current.CancellationToken)],
+            [.. platformReferences, baseLibrary, derivedLibrary, unrelatedLibrary],
+            new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        var errorBoundarySymbol = compilation.GetTypeByMetadataName("Microsoft.AspNetCore.Components.Web.ErrorBoundary")!;
+
+        var names = (ImmutableHashSet<string>)AnalyzerWhiteBoxTestHarness.InvokeAnalyzer("GetBoundaryComponentNames", compilation, errorBoundarySymbol, CancellationToken.None)!;
+
+        Assert.Equal(["BaseBoundary", "ErrorBoundary", "IndirectBoundary", "LocalBoundary"], names.Order(StringComparer.Ordinal));
+    }
+
+    private static MetadataReference EmitLibrary(string assemblyName, string source, MetadataReference[] references)
+    {
+        var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+            assemblyName,
+            [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(source)],
+            references,
+            new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        using var stream = new MemoryStream();
+        var result = compilation.Emit(stream);
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        return MetadataReference.CreateFromImage(stream.ToArray());
+    }
 }

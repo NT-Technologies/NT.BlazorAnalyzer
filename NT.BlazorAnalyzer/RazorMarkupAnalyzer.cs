@@ -52,6 +52,13 @@ internal static class RazorMarkupAnalyzer
                 continue;
             }
 
+            if (IsLineDirective(text, index))
+            {
+                var lineEnd = text.IndexOf('\n', index);
+                index = lineEnd < 0 ? text.Length : lineEnd + 1;
+                continue;
+            }
+
             if (text[index] != '<' || index + 1 >= text.Length)
             {
                 index++;
@@ -133,7 +140,7 @@ internal static class RazorMarkupAnalyzer
                 boundaryProtectedDynamicComponentTypeParameters.Add(dynamicComponentTypeParameter.TrimStart('@'));
             }
 
-            if (!tag.IsSelfClosing)
+            if (!tag.IsSelfClosing && !IsVoidElement(tag.Name))
             {
                 stack.Push(new TagFrame(tag.Name, isBoundary, isIgnoredRoot));
             }
@@ -148,6 +155,46 @@ internal static class RazorMarkupAnalyzer
             componentRoots: componentRoots.ToImmutable(),
             boundaryProtectedComponentNames: boundaryProtectedComponentNames.ToImmutable(),
             boundaryProtectedDynamicComponentTypeParameters: boundaryProtectedDynamicComponentTypeParameters.ToImmutable());
+    }
+
+    private static readonly string[] LineDirectives =
+    [
+        "inject", "inherits", "implements", "typeparam", "using", "namespace", "page", "layout", "attribute", "rendermode", "preservewhitespace"
+    ];
+
+    private static readonly string[] VoidElements =
+    [
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"
+    ];
+
+    private static bool IsVoidElement(string tagName) =>
+        tagName.Length > 0 && char.IsLower(tagName[0]) && Array.IndexOf(VoidElements, tagName.ToLowerInvariant()) >= 0;
+
+    private static bool IsLineDirective(string text, int index)
+    {
+        if (text[index] != '@')
+        {
+            return false;
+        }
+
+        for (var cursor = index - 1; cursor >= 0 && text[cursor] != '\n'; cursor--)
+        {
+            if (!char.IsWhiteSpace(text[cursor]))
+            {
+                return false;
+            }
+        }
+
+        foreach (var directive in LineDirectives)
+        {
+            var end = index + 1 + directive.Length;
+            if (StartsWith(text, index + 1, directive) && (end >= text.Length || char.IsWhiteSpace(text[end])))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool StartsWith(string text, int index, string value) =>
@@ -513,7 +560,10 @@ internal static class RazorMarkupAnalyzer
     {
         foreach (var attribute in attributes)
         {
-            if (attribute.Name.StartsWith("@bind-", StringComparison.OrdinalIgnoreCase))
+            var name = attribute.Name;
+            if (name.StartsWith("@bind-", StringComparison.OrdinalIgnoreCase) ||
+                name.StartsWith("@bind:", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("@bind", StringComparison.OrdinalIgnoreCase))
             {
                 return attribute;
             }
@@ -545,9 +595,16 @@ internal static class RazorMarkupAnalyzer
             boundaryComponentNames.Contains(simpleTagName);
     }
 
-    private static bool IsComponentTag(string tagName) =>
-        !string.IsNullOrEmpty(tagName) &&
-        (char.IsUpper(GetSimpleTagName(tagName)[0]) || tagName.IndexOf('.') >= 0);
+    private static bool IsComponentTag(string tagName)
+    {
+        if (string.IsNullOrEmpty(tagName))
+        {
+            return false;
+        }
+
+        var simpleTagName = GetSimpleTagName(tagName);
+        return simpleTagName.Length > 0 && (char.IsUpper(simpleTagName[0]) || tagName.IndexOf('.') >= 0);
+    }
 
     private static bool IsIgnoredRootComponent(string tagName)
     {
