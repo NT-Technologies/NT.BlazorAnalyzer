@@ -1,0 +1,14 @@
+is_global = true
+global_level = 1000
+dotnet_diagnostic.NTBA0001.severity = warning
+dotnet_diagnostic.NTBA0002.severity = warning
+dotnet_diagnostic.NTBA0003.severity = warning
+dotnet_diagnostic.NTBA0004.severity = warning
+dotnet_diagnostic.NTBA0005.severity = warning
+dotnet_diagnostic.NTBA0006.severity = warning
+dotnet_diagnostic.NTBA0007.severity = warning
+dotnet_diagnostic.NTBA0008.severity = warning
+dotnet_diagnostic.NTBA0009.severity = warning
+dotnet_diagnostic.NTBA0010.severity = warning
+dotnet_diagnostic.NTBA0011.severity = warning
+dotnet_diagnostic.NTBA0012.severity = warning

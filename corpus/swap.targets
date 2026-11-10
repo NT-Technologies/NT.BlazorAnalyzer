@@ -1,0 +1,15 @@
+<Project>
+  <!-- Imported through CustomAfterMicrosoftCommonTargets by Invoke-CorpusRun.ps1. -->
+  <Target Name="NtbaSwapAnalyzer" BeforeTargets="CoreCompile" Condition="'$(NtbaLocalDir)' != ''">
+    <ItemGroup>
+      <Analyzer Remove="@(Analyzer)" Condition="$([System.String]::Copy('%(Filename)').StartsWith('NT.BlazorAnalyzer'))" />
+      <Analyzer Include="$(NtbaLocalDir)NT.BlazorAnalyzer.dll" />
+      <EditorConfigFiles Include="$(MSBuildThisFileDirectory)all-warnings.globalconfig" />
+      <EditorConfigFiles Include="$(NtbaSettingsConfig)" Condition="'$(NtbaSettingsConfig)' != ''" />
+    </ItemGroup>
+    <WriteLinesToFile Condition="'$(UsingMicrosoftNETSdkRazor)' == 'true'" File="$(IntermediateOutputPath)ntba-corpus.stamp" Lines="$([System.DateTime]::UtcNow.Ticks)" Overwrite="true" />
+    <ItemGroup Condition="'$(UsingMicrosoftNETSdkRazor)' == 'true'">
+      <CustomAdditionalCompileInputs Include="$(IntermediateOutputPath)ntba-corpus.stamp" />
+    </ItemGroup>
+  </Target>
+</Project>
