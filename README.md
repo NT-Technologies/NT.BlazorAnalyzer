@@ -18,14 +18,41 @@ dotnet add package NT.BlazorAnalyzer
 
 The package is marked as a development dependency and contributes analyzer and code-fix assets without adding a compile-time or runtime library reference. The analyzer assemblies are loaded from `analyzers/dotnet/cs`.
 
-All diagnostics are enabled by default. Consumer projects can change individual severities in `.editorconfig`, for example:
+All diagnostics are enabled by default. The default "recommended" severities report the boundary-coverage rules NTBA0001 and NTBA0002 as Info, so existing apps can adopt the package without breaking builds that treat warnings as errors. Restore Warning for both with:
+
+```xml
+<PropertyGroup>
+  <NTBlazorAnalyzerMode>strict</NTBlazorAnalyzerMode>
+</PropertyGroup>
+```
+
+Consumer projects can change individual severities in `.editorconfig`, for example:
 
 ```ini
 [*.cs]
 dotnet_diagnostic.NTBA0009.severity = none
 ```
 
-The analyzer assembly targets `netstandard2.0`. This repository builds and tests with the .NET 10 SDK.
+The analyzer assembly targets `netstandard2.0` and references Roslyn 5.6, so consumers need the .NET SDK 10.0.300 or later (or a matching Visual Studio). Older compilers report CS9057 and skip the analyzer, which is an error in projects that treat warnings as errors. This repository builds and tests with the .NET 10 SDK.
+
+Per-rule documentation, including every setting, lives in [docs/rules](docs/rules/README.md).
+
+## Configuration
+
+Project-wide settings go in a `.globalconfig` file or the `[*.cs]` section of `.editorconfig`:
+
+| Setting | Effect |
+| --- | --- |
+| `ntba.failure_prone_type_suffixes` | Comma list replacing the receiver-type suffixes (`Repository`, `Service`, `Client`, `Provider`, `Manager`, `Store`, `Context`) that make a synchronous call such as `service.GetData()` failure-prone. |
+| `ntba.failure_prone_method_prefixes` | Comma list replacing the method prefixes (`Get`, `Load`, `Save`, ...) used for the same decision. |
+| `ntba.safe_types` | Fully qualified types (without type arguments) whose members, and calls returning them, never count as failure-prone. Use it for services that cannot throw, such as a wrapper that turns HTTP failures into a value. |
+| `ntba.failure_handling_methods` | Method names such as `OnSuccessAsync, OnFailureAsync` that turn failures into values; calls chained into them are safe. |
+| `ntba.assume_owner_error_boundary` | `true` treats every component as rendered inside an owner `ErrorBoundary`, suppressing NTBA0001, NTBA0002 and NTBA0003. Defaults to `true` for component libraries (no routable and no render-mode components) and `false` otherwise. |
+| `ntba.unknown_awaits_are_failure_prone` | `true` counts awaited calls with no evidence of failure as failure-prone, trading precision for recall. Strict mode sets it. |
+
+Calls are not failure-prone when they return a Result type (a `bool` property such as `IsSuccess`, `IsSuccessful`, `Succeeded`, `IsFailure`, `IsFailed`, `HasFailed` or `IsError`, directly or through `Task<T>`), invoke an `EventCallback`, target a toast or snackbar service, or call a built-in browser function such as `confirm` or `history.back` through JS interop. Custom boundaries that derive from `ErrorBoundaryBase` count as error boundaries.
+
+Failure-prone work needs evidence: JS interop, known I/O APIs (HttpClient and its JSON extensions, EF Core, streams and files, `JsonSerializer`, SignalR client, `IBrowserFile`), or operational naming (a `Get`/`Load`/`Save`... method on a `*Service`/`*Repository`/`*Client`... type). A call into the project's own code, including an interface with a single implementation in the project, is judged by what that code does, one level deep; a deliberate `throw` there (validation, an Identity redirect) is not counted. An awaited call with no such evidence, such as an unknown library method, is not failure-prone unless `ntba.unknown_awaits_are_failure_prone = true`, which strict mode sets.
 
 ## Projects
 
@@ -36,22 +63,30 @@ The analyzer assembly targets `netstandard2.0`. This repository builds and tests
 
 ## Rules
 
+NTBA0005, NTBA0007, NTBA0008, NTBA0011 and NTBA0012 apply to components with a declared render mode. NTBA0003, NTBA0004 and NTBA0006 also apply to components without one, because such a component becomes interactive when an interactive owner renders it; static SSR components are excluded from NTBA0003 and NTBA0004, and component libraries from NTBA0001 to NTBA0003 (see Configuration).
+
 | Rule | Default severity | Summary | Code fix |
 | --- | --- | --- | --- |
-| `NTBA0001` | Warning | Protect independently interactive render regions with `ErrorBoundary` | No |
-| `NTBA0002` | Warning | Handle failures in uncovered interactive entry methods | No |
-| `NTBA0003` | Warning | Handle failures in lifecycle methods or provide owner-boundary coverage | Wrap body in `try/catch` |
-| `NTBA0004` | Warning | Handle failure-prone disposal | Wrap body in `try/catch` |
-| `NTBA0005` | Warning | Handle JS interop failures | Wrap body in `try/catch` |
+| `NTBA0001` | Info (Warning in strict mode) | Protect independently interactive render regions with `ErrorBoundary` | No |
+| `NTBA0002` | Info (Warning in strict mode) | Handle failures in uncovered interactive entry methods | No |
+| `NTBA0003` | Warning | Handle failures in lifecycle methods or provide owner-boundary coverage | Wrap body in `try/catch` and log |
+| `NTBA0004` | Warning | Handle failure-prone disposal | Wrap body in `try/catch` and log |
+| `NTBA0005` | Warning | Handle JS interop failures | Wrap body in `try/catch` and log |
 | `NTBA0006` | Warning | Guard early-lifecycle JS interop with an interactivity check | Guard with `RendererInfo.IsInteractive` |
 | `NTBA0007` | Warning | Return `Task` or `ValueTask` instead of `async void` | Change return type to `Task` |
-| `NTBA0008` | Warning | Report the caught exception object or rethrow | Rethrow the exception |
+| `NTBA0008` | Warning | Report the caught exception object or rethrow | Log exception |
 | `NTBA0009` | Info | Consider custom content for a root `ErrorBoundary` | Add `ErrorContent` |
 | `NTBA0010` | Warning | Avoid relying on static layout boundaries for interactive failures | No |
+| `NTBA0011` | Warning | Observe failures of fire-and-forget component tasks | No |
+| `NTBA0012` | Warning | Handle failures in timer, navigation, and service-event callbacks | No |
+
+### What counts as handling
+
+For NTBA0002 through NTBA0005, a `catch` contains a failure when it does not throw and is not only an expected-swallow catch (`OperationCanceledException`/`TaskCanceledException`, `JSDisconnectedException`, or a `when` filter on `IsCancellationRequested`). Whether a containing catch also logs is NTBA0008's concern, so a swallowed exception is reported once, by NTBA0008. NTBA0008 reports only general catches (`catch` or `catch (Exception)`) that neither pass the exception object to a call nor rethrow; catching a specific exception type is treated as deliberate.
 
 ### `NTBA0001`
 
-Warning when an explicitly interactive component has an unprotected independently interactive render region. The analyzer evaluates each top-level render region independently, ignores `PageTitle` and `HeadContent`, allows inert HTML roots, and requires event-callback HTML roots or interactive component roots to be protected by `ErrorBoundary` or a derived component at an appropriate containment level.
+Reported (Info by default, Warning in strict mode) when an explicitly interactive component has an unprotected independently interactive render region. The analyzer evaluates each top-level render region independently, ignores `PageTitle` and `HeadContent`, allows inert HTML roots, and requires event-callback HTML roots or interactive component roots to be protected by `ErrorBoundary` or a derived component at an appropriate containment level.
 
 NTBA0001 is region-based, not component-root-based:
 - one diagnostic is emitted per uncovered interactive region
@@ -70,11 +105,11 @@ Content that does not count by itself:
 - ignored roots such as `PageTitle` and `HeadContent`
 
 Diagnostic text:
-`Interactive render region in component '{ComponentName}' should be protected by ErrorBoundary. Wrapping '{RootName}' in an ErrorBoundary resolves this warning. Suggested scope: '{SuggestedScope}'.`
+`Interactive render region in component '{ComponentName}' should be protected by ErrorBoundary. Wrapping '{RootName}' in an ErrorBoundary resolves this diagnostic. Suggested scope: '{SuggestedScope}'.`
 
 ### `NTBA0002`
 
-Warning when an interactive entry method reachable from an independently interactive render region without `ErrorBoundary` coverage performs failure-prone work without `try/catch` handling.
+Reported (Info by default, Warning in strict mode) when an interactive entry method reachable from an independently interactive render region without `ErrorBoundary` coverage performs failure-prone work without `try/catch` handling.
 
 This rule is entrypoint-oriented, not helper-oriented:
 - only interactive entry methods discovered from uncovered render regions are considered
@@ -105,10 +140,10 @@ Notes:
 - a component's own root `ErrorBoundary` does not protect that component's lifecycle method; the component must be rendered by an owner that is already covered
 - if every known static owner path renders the component inside `ErrorBoundary`, local lifecycle `try/catch` is not required
 - root-boundary coverage can flow through local `RenderTreeBuilder` helper methods, protected concrete derived component usages, and `DynamicComponent` dialog hosts whose type slot is inside a known `ErrorBoundary`
-- custom boundary tags are trusted only when the component type is known to inherit `ErrorBoundary`, including boundaries from referenced assemblies
+- custom boundary tags are trusted only when the component type is known to inherit `ErrorBoundaryBase`, including boundaries from referenced assemblies
 - pure delegation to a safe local helper is accepted
 - trivial local state mutation alone does not trigger `NTBA0003`
-- a swallowed catch can still trigger `NTBA0003` alongside `NTBA0008`
+- static SSR components, which have no declared render mode and receive a `[CascadingParameter] HttpContext`, are not reported because their failures become HTTP error responses
 
 ### `NTBA0004`
 
@@ -118,16 +153,15 @@ Notes:
 - `DisposeCore`-style helpers are analyzed transitively, but the warning stays on `Dispose` or `DisposeAsync`
 - pure delegation to a safe local cleanup helper is accepted
 - trivial local cleanup alone does not trigger `NTBA0004`
-- a swallowed catch can still trigger `NTBA0004` alongside `NTBA0008`
 
 ### `NTBA0005`
 
 Warning when a component method performs JS interop without meaningful exception handling.
 
 Notes:
-- a catch that logs or rethrows satisfies the rule
-- a swallowed catch can still trigger `NTBA0005` alongside `NTBA0008`
-- `DisposeAsync` cleanup that catches `JSDisconnectedException` is treated as an allowed Blazor cleanup pattern
+- a catch that does not rethrow satisfies the rule; a bare rethrow does not
+- JS cleanup that catches only `JSDisconnectedException` is accepted in `Dispose`/`DisposeAsync` and in `DisposeCore`/`DisposeAsyncCore` helpers when the JS call is directly inside the `try`, and in any `try` that disposes an `IJSObjectReference`, following Microsoft's documented pattern
+- built-in browser functions such as `confirm` and `history.back` are not treated as failure-prone
 - methods that only delegate to a safe local JS helper do not need their own wrapper
 
 ### `NTBA0006`
@@ -153,16 +187,18 @@ Notes:
 ### `NTBA0008`
 
 Warning on `catch` blocks that neither:
-- log or report the caught exception object
+- pass the caught exception object to a call, such as a logger, telemetry, notification, or `DispatchExceptionAsync`
 - nor rethrow
 
 Notes:
-- scope-only or message-only calls such as `Logger.BeginScope(...)` or `Logger.LogError(ex.Message)` do not satisfy the rule
-- expected `JSDisconnectedException` cleanup during JS object disposal is still treated as an accepted pattern
+- only general catches (`catch` or `catch (Exception)`) are reported; catching a specific exception type is deliberate
+- a catch that tells the user, by calling a toast or snackbar service or storing an error message string in component state, is not silent and is not reported
+- message-only calls such as `Logger.LogError(ex.Message)` do not satisfy the rule
+- expected swallows are accepted: `OperationCanceledException`/`TaskCanceledException`, `JSDisconnectedException`, and `when` filters that check `IsCancellationRequested`
 
 ### `NTBA0009`
 
-Info when a component opens `ErrorBoundary` first but relies on the default `ErrorBoundary` fallback UI.
+Info when a component opens a boundary first that relies on the default fallback UI: `Microsoft.AspNetCore.Components.Web.ErrorBoundary`, or a subclass that does not render its own error content, with no `ErrorContent`. Custom `ErrorBoundaryBase` implementations render their own UI and are not reported.
 
 Notes:
 - custom `ErrorContent` is optional in Blazor
@@ -177,17 +213,25 @@ Notes:
 - it doesn't catch interactive event-handler failures unless app routes are globally interactive
 - narrower page or widget boundaries are usually the safer default
 
+### `NTBA0011`
+
+Warning when an interactive component discards a task (`_ = LoadAsync();`) or calls a task-returning method as a statement in a non-async method, and that task can fail without being handled. Its failure never reaches the renderer or an `ErrorBoundary`. Await the task, or catch failures inside it and pass them to `DispatchExceptionAsync`.
+
+### `NTBA0012`
+
+Warning when a callback subscribed to `System.Timers.Timer.Elapsed`, passed to `System.Threading.Timer`, subscribed to `NavigationManager.LocationChanged`, or subscribed to an application service event performs failure-prone work without handling. These callbacks run outside the renderer's call stack, so `ErrorBoundary` cannot catch their failures.
+
 ## Code Fixes
 
 The packaged code-fix provider supports `NTBA0003` through `NTBA0009`, except rules whose fixes require a design or containment decision:
 
-- `NTBA0003`, `NTBA0004`, and `NTBA0005`: wrap a supported method body in `try/catch`
+- `NTBA0003`, `NTBA0004`, and `NTBA0005`: wrap the body of a `void` or `async Task`/`ValueTask` method in `try/catch` that logs the exception through the component's `ILogger`, adding an injected `Logger` property and `using Microsoft.Extensions.Logging;` when needed
 - `NTBA0006`: add a `RendererInfo.IsInteractive` guard
 - `NTBA0007`: change an eligible `async void` method to return `Task`
-- `NTBA0008`: rethrow the caught exception
-- `NTBA0009`: add Razor `ErrorContent` markup when the boundary shape can be edited safely
+- `NTBA0008`: log the caught exception, naming the catch variable when needed
+- `NTBA0009`: add Razor `ErrorContent` markup with a generic message when the boundary shape can be edited safely
 
-Batch Fix All is available through Roslyn's standard batch fixer. `NTBA0001`, `NTBA0002`, and `NTBA0010` intentionally have no automatic fix because the correct boundary placement or error-handling design depends on the component hierarchy.
+Batch Fix All is available through Roslyn's standard batch fixer. `NTBA0001`, `NTBA0002`, `NTBA0010`, `NTBA0011`, and `NTBA0012` intentionally have no automatic fix because the correct boundary placement or error-handling design depends on the component hierarchy.
 
 ## Examples
 
@@ -463,6 +507,7 @@ Why:
 
 @code {
     [Inject] private IJSRuntime JS { get; set; } = default!;
+    [Inject] private ILogger<Counter> Logger { get; set; } = default!;
 
     protected override async Task OnInitializedAsync()
     {
@@ -470,9 +515,9 @@ Why:
         {
             await JS.InvokeVoidAsync("doSomething");
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            throw;
+            Logger.LogError(exception, "Loading client state failed.");
         }
     }
 }
@@ -503,6 +548,7 @@ Why:
 
 @code {
     [Inject] private IJSRuntime JS { get; set; } = default!;
+    [Inject] private ILogger<Counter> Logger { get; set; } = default!;
 
     protected override async Task OnInitializedAsync()
     {
@@ -522,9 +568,9 @@ Why:
         {
             await JS.InvokeVoidAsync("doSomething");
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            throw;
+            Logger.LogError(exception, "Loading client state failed.");
         }
     }
 }
@@ -602,7 +648,13 @@ dotnet pack ./NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj --configuration Release
 pwsh ./test-analyzer-package.ps1 -PackagePath ./artifacts/nuget/NT.BlazorAnalyzer.0.0.0-local.nupkg
 ```
 
-The package verifier checks the NuGet layout and metadata, rejects compile/runtime and compiler-owned assemblies, installs the package into an isolated .NET 10 consumer, and requires that the consumer build report `NTBA0001`.
+The package verifier checks the NuGet layout and metadata, rejects compile/runtime assemblies and any host-owned assembly under `analyzers/`, installs the package into an isolated strict-mode consumer with a real `Counter.razor` component targeting `net8.0`, `net9.0`, and `net10.0`, and requires `NTBA0001` and `NTBA0002` at the Razor source location for every target framework.
+
+Measure the analyzer against real applications with the corpus script. It builds each project with the locally built analyzer, reports every rule as a warning, and diffs against an earlier run:
+
+```powershell
+pwsh ./corpus/Invoke-CorpusRun.ps1 -Project D:\App\App.WebApp\App.WebApp.csproj -OutputPath ./artifacts/corpus/after.txt -BaselinePath ./artifacts/corpus/before.txt
+```
 
 The repository selects Microsoft Testing Platform through `global.json`, uses `xunit.v3.mtp-v2` as its test runner integration, and collects coverage through `Microsoft.Testing.Extensions.CodeCoverage`. It does not use Coverlet or the VSTest compatibility runner.
 
@@ -612,8 +664,7 @@ Repository builds enable the .NET SDK analyzers and code-style analysis, treat e
 
 GitHub Actions files are under `.github/workflows`:
 
-- `ci.yml`: restores, builds, tests, and collects coverage on pull requests, pushes to `main`, and manual runs
-- `publish-prerelease.yml`: validates pushes to `main`, tags release-worthy builds with a semantic-release preview version, then verifies and publishes that tagged version's `.nupkg` and `.snupkg` to NuGet
+- `ci.yml`: restores, builds, tests, and collects coverage on pull requests, pushes to `main`, and manual runs; after a successful `main` validation, it tags release-worthy builds with a semantic-release preview version, then verifies and publishes that tagged version's `.nupkg` and `.snupkg` to NuGet
 - `release.yml`: manually tags a stable semantic release from `main`, verifies and publishes that full version, unlists superseded previews, and opens a follow-up analyzer release-tracking pull request when unshipped rules need promotion
 
 [Dependabot configuration](.github/dependabot.yml) checks NuGet and GitHub Actions dependencies weekly and groups updates by ecosystem.
@@ -626,7 +677,7 @@ Release configuration lives in `.releaserc.json` and uses:
 
 Commit analysis and release notes use the Conventional Commits preset.
 
-The release flow is intentionally split:
+The release flow is:
 
 1. A push to `main` validates the repository.
 2. Semantic-release evaluates the Conventional Commits history on the `preview` release branch and, when warranted, tags the validated commit as `v${version}-preview.${number}`.
@@ -649,7 +700,8 @@ The package is a development-only Roslyn analyzer package:
 
 - analyzer and code-fix assemblies are under `analyzers/dotnet/cs`
 - code-fix workspace and composition dependencies are colocated with the code-fix provider
-- compiler-owned assemblies such as `Microsoft.CodeAnalysis.dll`, `Microsoft.CodeAnalysis.CSharp.dll`, `System.Collections.Immutable.dll`, and `System.Reflection.Metadata.dll` are excluded
+- host-owned assemblies (Roslyn compiler and Workspaces, `System.Composition`, `Humanizer`, and similar) are excluded; only `NT.BlazorAnalyzer.*` files ship under `analyzers/dotnet/cs`
 - no assemblies are published under `lib`, so the package does not add a compile-time or runtime API
+- `build/NT.BlazorAnalyzer.targets` and `build/NT.BlazorAnalyzer.strict.globalconfig` implement the `NTBlazorAnalyzerMode=strict` preset
 - the `.nupkg` includes `README.md`, `Logo.png`, analyzer symbols, and repository metadata; packing also creates a `.snupkg`
 - XML documentation is generated beside the analyzer and code-fix build outputs
