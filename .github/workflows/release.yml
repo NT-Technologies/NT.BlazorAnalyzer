@@ -11,6 +11,11 @@ permissions:
 jobs:
   publish-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
 
     steps:
       - name: Checkout main
@@ -23,12 +28,15 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            10.0.x
+            11.0.x
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
           node-version: lts/*
+          cache: npm
 
       - name: Restore
         run: dotnet restore NT.BlazorAnalyzer.slnx
@@ -81,15 +89,15 @@ jobs:
 
       - name: Install semantic-release
         if: steps.check-tags.outputs.is_tagged == 'false'
-        run: npm install --no-save semantic-release @semantic-release/commit-analyzer @semantic-release/release-notes-generator @semantic-release/github conventional-changelog-conventionalcommits
+        run: npm ci
 
-      - name: Validate NuGet API key
+      - name: Validate NuGet user
         if: steps.check-tags.outputs.is_tagged == 'false'
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_USER: ${{ secrets.NUGET_USER }}
         run: |
-          if [ -z "$NUGET_API_KEY" ]; then
-            echo "NUGET_API_KEY secret is missing or unavailable to this workflow."
+          if [ -z "$NUGET_USER" ]; then
+            echo "NUGET_USER secret is missing or unavailable to this workflow."
             exit 1
           fi
 
@@ -131,11 +139,18 @@ jobs:
         if: steps.check-tags.outputs.is_tagged == 'false'
         run: pwsh ./test-analyzer-package.ps1 -PackagePath "./artifacts/nuget/NT.BlazorAnalyzer.${{ steps.release-version.outputs.version }}.nupkg"
 
+      - name: NuGet login (OIDC)
+        id: login
+        if: steps.check-tags.outputs.is_tagged == 'false'
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       - name: Publish NuGet package
         id: publish
         if: steps.check-tags.outputs.is_tagged == 'false'
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: |
           dotnet nuget push ./artifacts/nuget/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
           dotnet nuget push ./artifacts/nuget/*.snupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
@@ -143,7 +158,7 @@ jobs:
       - name: Unlist older prerelease packages
         if: steps.check-tags.outputs.is_tagged == 'false'
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: |
           set -euo pipefail
           release_version="${{ steps.release-version.outputs.version }}"
@@ -213,7 +228,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 11.0.x
 
       - name: Resolve stable release version
         id: release-version

@@ -29,7 +29,9 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            10.0.x
+            11.0.x
 
       - name: Restore
         run: dotnet restore NT.BlazorAnalyzer.slnx
@@ -83,6 +85,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
+      id-token: write
 
     steps:
       - name: Checkout code
@@ -105,17 +108,18 @@ jobs:
         if: steps.check-tags.outputs.is_tagged == 'false'
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 11.0.x
 
       - name: Setup Node.js
         if: steps.check-tags.outputs.is_tagged == 'false'
         uses: actions/setup-node@v7
         with:
           node-version: lts/*
+          cache: npm
 
       - name: Install semantic-release
         if: steps.check-tags.outputs.is_tagged == 'false'
-        run: npm install --no-save semantic-release @semantic-release/commit-analyzer @semantic-release/release-notes-generator @semantic-release/github conventional-changelog-conventionalcommits
+        run: npm ci
 
       - name: Tag preview build and create GitHub prerelease
         if: steps.check-tags.outputs.is_tagged == 'false'
@@ -144,16 +148,6 @@ jobs:
           fi
           echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Validate NuGet API key
-        if: steps.check-tags.outputs.is_tagged == 'false' && steps.release-version.outputs.version != ''
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: |
-          if [ -z "$NUGET_API_KEY" ]; then
-            echo "NUGET_API_KEY secret is missing or unavailable to this workflow."
-            exit 1
-          fi
-
       - name: Restore release dependencies
         if: steps.check-tags.outputs.is_tagged == 'false' && steps.release-version.outputs.version != ''
         run: dotnet restore NT.BlazorAnalyzer.slnx
@@ -174,11 +168,18 @@ jobs:
         if: steps.check-tags.outputs.is_tagged == 'false' && steps.release-version.outputs.version != ''
         run: pwsh ./test-analyzer-package.ps1 -PackagePath "./artifacts/nuget/NT.BlazorAnalyzer.${{ steps.release-version.outputs.version }}.nupkg"
 
+      - name: NuGet login (OIDC)
+        id: login
+        if: steps.check-tags.outputs.is_tagged == 'false' && steps.release-version.outputs.version != ''
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       - name: Publish NuGet package
         id: publish
         if: steps.check-tags.outputs.is_tagged == 'false' && steps.release-version.outputs.version != ''
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: |
           dotnet nuget push ./artifacts/nuget/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
           dotnet nuget push ./artifacts/nuget/*.snupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate

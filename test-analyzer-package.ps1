@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackagePath,
     # Each framework compiles the component with its own Razor language version.
-    [string[]]$TargetFrameworks = @('net8.0', 'net9.0', 'net10.0')
+    [string[]]$TargetFrameworks = @('net8.0', 'net9.0', 'net10.0', 'net11.0')
 )
 
 $ErrorActionPreference = 'Stop'

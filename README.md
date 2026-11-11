@@ -648,7 +648,7 @@ dotnet pack ./NT.BlazorAnalyzer/NT.BlazorAnalyzer.csproj --configuration Release
 pwsh ./test-analyzer-package.ps1 -PackagePath ./artifacts/nuget/NT.BlazorAnalyzer.0.0.0-local.nupkg
 ```
 
-The package verifier checks the NuGet layout and metadata, rejects compile/runtime assemblies and any host-owned assembly under `analyzers/`, installs the package into an isolated strict-mode consumer with a real `Counter.razor` component targeting `net8.0`, `net9.0`, and `net10.0`, and requires `NTBA0001` and `NTBA0002` at the Razor source location for every target framework.
+The package verifier checks the NuGet layout and metadata, rejects compile/runtime assemblies and any host-owned assembly under `analyzers/`, installs the package into an isolated strict-mode consumer with a real `Counter.razor` component targeting `net8.0`, `net9.0`, `net10.0`, and `net11.0`, and requires `NTBA0001` and `NTBA0002` at the Razor source location for every target framework.
 
 Measure the analyzer against real applications with the corpus script. It builds each project with the locally built analyzer, reports every rule as a warning, and diffs against an earlier run:
 
@@ -667,9 +667,9 @@ GitHub Actions files are under `.github/workflows`:
 - `ci.yml`: restores, builds, tests, and collects coverage on pull requests, pushes to `main`, and manual runs; after a successful `main` validation, it tags release-worthy builds with a semantic-release preview version, then verifies and publishes that tagged version's `.nupkg` and `.snupkg` to NuGet
 - `release.yml`: manually tags a stable semantic release from `main`, verifies and publishes that full version, unlists superseded previews, and opens a follow-up analyzer release-tracking pull request when unshipped rules need promotion
 
-[Dependabot configuration](.github/dependabot.yml) checks NuGet and GitHub Actions dependencies weekly and groups updates by ecosystem.
+[Dependabot configuration](.github/dependabot.yml) checks NuGet, GitHub Actions, and npm dependencies weekly and groups updates by ecosystem.
 
-Release configuration lives in `.releaserc.json` and uses:
+Release configuration lives in `.releaserc.json`. The semantic-release tooling is pinned in `package.json` and `package-lock.json`, and both workflows install it with `npm ci`. Release configuration uses:
 
 - `@semantic-release/commit-analyzer`
 - `@semantic-release/release-notes-generator`
@@ -690,7 +690,7 @@ Both publishing workflows remove a newly created tag if a downstream publication
 
 Required GitHub secrets:
 
-- `NUGET_API_KEY`: NuGet.org API key with package push permissions
+- `NUGET_USER`: nuget.org profile name (not email) that owns the [trusted publishing](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing) policies for `ci.yml` and `release.yml`; both workflows use `NuGet/login` to exchange the GitHub OIDC token for a one-hour API key that pushes packages and, in `release.yml`, unlists superseded previews
 
 GitHub release creation, tag management, preview-branch updates, and release-tracking pull requests use the workflow-provided `GITHUB_TOKEN`; no separate semantic-release token is required.
 
