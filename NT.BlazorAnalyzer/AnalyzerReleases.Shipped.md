@@ -14,3 +14,19 @@ NTBA0007 | Reliability | Warning | Interactive component methods should not be a
 NTBA0008 | Reliability | Warning | Catch blocks in interactive components should log, track, or rethrow exceptions.
 NTBA0009 | Reliability | Info | Root ErrorBoundary should consider custom ErrorContent.
 NTBA0010 | Reliability | Warning | Static layout ErrorBoundary has limited interactive coverage.
+
+## Release 3.0.0
+
+### New Rules
+
+Rule ID | Category | Severity | Notes
+--------|----------|----------|------
+NTBA0011 | Reliability | Warning | Fire-and-forget component tasks should observe failures.
+NTBA0012 | Reliability | Warning | Callbacks from timers, navigation, or service events should handle failures.
+
+### Changed Rules
+
+Rule ID | New Category | New Severity | Old Category | Old Severity | Notes
+--------|--------------|--------------|--------------|--------------|-------
+NTBA0001 | Reliability | Info | Reliability | Warning | Recommended default; set NTBlazorAnalyzerMode=strict for Warning.
+NTBA0002 | Reliability | Info | Reliability | Warning | Recommended default; set NTBlazorAnalyzerMode=strict for Warning.
